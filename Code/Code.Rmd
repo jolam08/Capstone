@@ -1,0 +1,349 @@
+---
+title: "Code"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(ggmap)
+library(dplyr)
+library(ggplot2)
+library(mapview)
+library(tm)
+library(tidytext)
+library(textstem)
+library(stringr)
+library(wordcloud)
+library(Hmisc)
+
+register_google(key="AIzaSyBAfwGIFqbBu3Vfjz_nMO3iqmzYQZglyP8")
+```
+
+
+#Read data files 
+```{r setup, include=FALSE}
+mayreviews <- read.csv("/Users/Joanne/Documents/ChangSchool/Capstone/Airbnb/TOlistingfiles/Mayreviews.csv", na.strings="", stringsAsFactors = FALSE)
+maylistings <- read.csv("/Users/Joanne/Documents/ChangSchool/Capstone/Airbnb/TOlistingfiles/maylistings_short.csv", na.strings="")
+```
+
+```{r}
+str(maylistings)
+str(mayreviews)
+
+#rename list id to listing_id 
+names(maylistings)[1] <- "listing_id"
+names(maylistings)
+
+
+```
+
+#Exploratory data 
+```{r}
+#remove unneeded variables - name, host_name, neighbourhood_group,  availability_365
+#void variables we dont need
+
+df <- subset(maylistings, select= -c(name, host_name, neighbourhood_group, availability_365))
+
+#df has 12 variables 
+
+#summary of variables using Hmisc library 
+describe(df) 
+```
+
+```{r}
+#check for NAs
+colSums(is.na(df)|df == '')
+
+#4205 last review & reviews_per_month missing values under comments
+```
+
+```{r}
+#quick descriptive information
+with(df, summary(room_type))
+with(df, summary(price))
+with(df, summary(minimum_nights))
+with(df, summary(number_of_reviews))
+
+#Top 5 neighborhoods by listing number 
+df %>% group_by(neighbourhood) %>%
+  summarise(nr=length(neighbourhood)) %>% top_n(n=5) %>% 
+  arrange(-nr) %>% ungroup() -> top5
+top5 #output top 5 neighbourhood
+
+#create new dataframe with top 5 neighbourhood listing numbers 
+top5df <- subset(df, neighbourhood == 'Waterfront Communities-The Island'|neighbourhood == 'Niagara'| neighbourhood =='Annex'| neighbourhood == 'Bay Street Corridor'| neighbourhood == 'Church-Yonge Corridor')
+
+summary(top5df)
+```
+
+##Room Type 
+```{r}
+with(df, summary(room_type))
+describe(df$room_type) #frequency table
+
+#BARPLOT - LISTING GROUPED BY ROOM TYPE
+df %>% filter(!is.na(room_type)) %>% group_by(room_type) %>%
+  summarise(nr=length(room_type)) %>% ungroup() -> rt
+
+#get percentage 
+rt = mutate(rt,
+            percentage = (nr/sum(rt$nr)*100))
+
+rt
+
+#library(ggplot2)
+ggplot(data= rt, aes(x = reorder(room_type, nr), y=nr/1000)) +
+  geom_bar(stat="identity", fill="orange", colour="black") + theme_bw(base_size=10) + geom_text(aes(label=nr), vjust=0, nudge_y = 0.5) + 
+  labs(title="Listings grouped by Room Type", x= "Room Type", y="Number of listings")
+```
+
+64% of listings are entire home/apt 
+33% of listings are private rooms 
+1.80% of listings are shared room 
+0.33% are hotel rooms 
+
+##Price 
+IQR range, middle 50% is a measure of statistical dispersion, the difference between the 75th and 25th percentile, or between upper and lower quartiles, IQR = Q3- Q1. 
+- Outliers capping
+
+```{r}
+describe(df$price) #mean 144.6 
+
+#boxplot of price 
+outrt = boxplot.stats(df$price)$out #using IQR method to display data and outliers 
+which(df$price %in% outrt) #which numbers are outliers 
+length(outrt) #total amount of outliers - 1625
+
+#handling extreme values that lie outside the 1.5* IQR limits with capping (replacing observations that lie below limit with value of 5th percentile and those that lie above the upper limit with the value of 95th percentile) 
+replace_outliers <- function(x, removeNA=TRUE){ #function to capping outliers 
+  price <- x
+  qnt <- quantile(price, probs=c(.25, .75), na.rm= removeNA)
+  caps <- quantile(price, probs=c(.05, .95), na.rm = removeNA)
+  H <- 1.5 * IQR(price, na.rm = removeNA)
+  price[price < (qnt[1] - H)] <- caps[1]
+  price[price > (qnt[2] + H)] <- caps[2]
+  price
+}
+
+Capped_price <- replace_outliers(df$price)
+df$price <- replace_outliers(df$price) #capp price on df
+
+#output comparison 
+boxplot(df$price, main="Price with outliers")
+boxplot(Capped_price, main="price without outliers", boxwex=0.1)
+
+describe(Capped_price)
+describe(df$price)
+```
+
+```{r}
+#how mean price differs based on room type
+RTmeans = with(df, by(price, room_type, mean))
+RTmeans
+
+#how mean price differs based on neighbourhood 
+Nmeans = with(df, by(price, neighbourhood, mean))
+Nmeans
+
+library(ggpubr)
+ggboxplot(df, x="room_type", y="price") #boxplot by room type and price 
+```
+
+##minimum nights 
+- minimum nights required.... but probably need this in the analysis 
+```{r}
+describe(df$minimum_nights)
+boxplot(df$minimum_nights)
+
+#boxplot of outliers of minimum nights 
+outmn = boxplot.stats(df$minimum_nights)$out #using IQR method to display data 
+outmn
+which(df$minimum_nights %in% outmn) #which numbers are outlier
+length(outmn) #total amount of outliers - 3104
+```
+
+##number of reviews 
+```{r}
+describe(df$number_of_reviews)
+boxplot(df$number_of_reviews)
+
+df %>% filter(!is.na(room_type)) %>% #group by room type & count number of reviews 
+  group_by(room_type) %>% 
+  summarise(nr=length(number_of_reviews)) %>%
+  ungroup() -> numr
+
+numr
+
+#boxplot by room type and number of reviews 
+ggboxplot(df, x="room_type", y="number_of_reviews")
+```
+
+##reviews per month 
+```{r}
+describe(df$reviews_per_month) #missing 4205 values 
+boxplot(df$reviews_per_month)
+
+#boxplot by room type and reviews by month
+ggboxplot(df, x="room_type", y="reviews_per_month")
+```
+
+##neighbourhoods
+```{r}
+#top 20 neighbourhoods 
+df %>% group_by(neighbourhood) %>%
+  summarise(nr=length(neighbourhood)) %>% top_n(n=20) %>% 
+  arrange(-nr) %>% ungroup() -> ng
+
+#boxplot of top 20 neighbourhoods 
+ggplot(data=ng, aes(x=reorder(neighbourhood,nr), y=nr)) +
+  geom_bar(stat="identity", fill="grey", colour="black") + 
+  coord_flip() + theme_bw(base_size=10) + 
+  labs(title="Top 20 Toronto neighborhoods with the most listings", y="Number of Listings", x="Neighbourhood")
+
+#top 5 neighbourhoods 
+df %>% group_by(neighbourhood) %>%
+  summarise(nr=length(neighbourhood)) %>% top_n(n=5) %>% 
+  arrange(-nr) %>% ungroup() -> tf
+
+#boxplot of top 5 neighbourhoods 
+ggplot(data=tf, aes(x=reorder(neighbourhood,nr), y=nr)) +
+  geom_bar(stat="identity", fill="grey", colour="black") + 
+  coord_flip() + theme_bw(base_size=10) + 
+  labs(title="Top 5 Toronto neighborhoods with the most listings", y="Number of Listings", x="Neighbourhood")
+```
+
+
+##Toronto MAP 
+packages: get_map and ggmap 
+
+```{r}
+#fetch map with location name
+#library(ggmap)
+
+#registered google API and activated using register_google() 
+#enabled geocoding API on google cloud 
+#m <- get_map("Toronto",zoom=12, source="google") #get map of toronto
+#ggmap(m)
+
+#Fetch boundary specific map
+#bbox <- make_bbox(df$longitude, df$latitude, f=0.05)
+#b <- get_map(bbox, maptype = "toner-lite", source="stamen")
+#ggmap(b)
+
+#Total TO listings
+ggmap(b) + geom_point(data=df, aes(longitude, latitude), color="orange", size=0.01, alpha = 0.7) + labs(x = "Longtitude", y= "Latitude", title="Airbnb Toronto Listing Locations")
+
+#Top 5 neighbourhoods 
+bboxfive <- make_bbox(top5df$longitude, top5df$latitude, f=0.05) #boundary specific
+bb <- get_map(bboxfive, maptype = "toner-lite", source="stamen")
+
+ggmap(bb) + geom_point(data=top5df, aes(longitude, latitude, color=neighbourhood), size=0.01, alpha = 0.7) + labs(x = "Longtitude", y= "Latitude", title="Airbnb Toronto Top 5 Listing Locations")
+```
+
+#Exploratory - review dataset 
+
+```{r}
+str(mayreviews)
+
+#right outer join by listing_id
+#mr <- right_join(maylistings, mayreviews)
+``` 
+
+
+```{r}
+#convert date to an R date class 
+mayreviews$date <- as.Date(mayreviews$date, format = "%Y-%m-%d")
+
+#view R class of data 
+class(mayreviews$date)
+
+#view results 
+head(mayreviews$date)
+
+#new variable- extract YEAR (and convert to numeric format)
+mayreviews$year <- as.numeric(format(mayreviews$date,'%Y'))
+
+#new variable-extract MONTH (and convert to numeric format)
+mayreviews$month <- as.numeric(format(mayreviews$date,'%m'))
+```
+
+Group review by year written 
+```{r}
+mayreviews %>% filter(!is.na(year)) %>% group_by(year) %>%
+  summarise(nr=length(year)) %>% arrange(-year) %>% ungroup() -> yr
+
+yr
+
+ggplot(data=yr, aes(x=year, y=nr)) +
+  geom_line(stat="identity", colour="black", linetype=5, show.legend = TRUE) + 
+  geom_point() + 
+  geom_text(aes(label=nr), size=3, vjust=-0.5, nudge_y=0.5, colour='red') + 
+  theme_bw(base_size=10) + 
+  labs(title="Number of reviews (by Year)", y="Number of Listings") +
+  scale_x_discrete(name = "Year", 
+                   limits = c(seq(2009,2020,by=1)))
+```
+
+
+Break down monthly reviews written in 2019 
+```{r}
+mayreviews %>% filter(!is.na(year == '2019')) %>% group_by(month) %>%
+  summarise(nr=length(month)) %>% ungroup() -> mth
+
+mth
+
+#create geom_line of monthly reviews written in 2019 
+ggplot(data=mth, aes(x=month, y=nr)) + 
+  geom_line(stat="identity", colour="black", linetype=5) + 
+  geom_point() + 
+  geom_text(aes(label=nr), vjust=-0.5, nudge_y=0.5, colour='red', size=3) + 
+  theme_bw(base_size=10) + 
+  labs(title="Number of reviews (by month in 2019) ", y="Number of Listings") + 
+  scale_x_discrete(name = "Months", 
+                   limits = c("1"="Jan", 
+                              "2"="Feb", 
+                              "3"= "Mar", 
+                              "4"="April", 
+                              "5"= "May", 
+                              "6"="June", 
+                              "7"= "july",
+                              "8" = "Aug",
+                              "9" = "Sept",
+                              "10" = "Oct",
+                              "11" = "Nov",
+                              "12" = "Dec"
+                              ))
+
+
+#http://www.cookbook-r.com/Graphs/Axes_(ggplot2)/
+#ensure x axis has every month for the label
+```
+
+
+##Time Series 
+
+```{r}
+#Grouping number of reviews by year and month 
+m <- group_by(mayreviews, year, month)
+monthly <- summarise(m, number_reviews=n())
+
+
+ggplot(data=monthly, aes(x=month, y=number_reviews)) + 
+  geom_bar(stat="identity", fill ="darkorchid4") + 
+  facet_wrap( ~ year, ncol = 4) + 
+  labs(title = "Number of Reviews posted in Toronto", 
+       subtitle="By year", 
+       y="Number of reviews", 
+       x="Month") + 
+  theme_bw(base_size = 10) +
+  scale_x_discrete()
+```
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
