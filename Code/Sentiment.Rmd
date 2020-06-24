@@ -1,0 +1,532 @@
+---
+title: "Lam_datadescrip"
+output: html_document
+---
+
+#Read libraries 
+
+```{r} 
+library(dplyr)
+library(ggplot2)
+library(tm)
+library(tidytext)
+library(textstem)
+library(stringr)
+library(wordcloud)
+library(tidyr)
+```
+
+#READ DATA FILES + right outer join 
+
+```{r setup, include=FALSE}
+mayreviews <- read.csv("/Users/Joanne/Documents/ChangSchool/Capstone/Airbnb/TOlistingfiles/Mayreviews.csv", na.strings="", stringsAsFactors = FALSE)
+maylistings <- read.csv("/Users/Joanne/Documents/ChangSchool/Capstone/Airbnb/TOlistingfiles/maylistings_short.csv", na.strings="")
+```
+
+```{r}
+#rename list id to listing_id 
+names(maylistings)[1] <- "listing_id"
+names(maylistings)
+
+#right outer join by listing_id
+mr <- right_join(maylistings, mayreviews, by = "listing_id")
+
+#remove unneed variables - keep neighbourhood 
+mr <- subset(mr, select= c(listing_id, id, neighbourhood, date, comments))
+head(mr)
+
+#convert date to date format
+mr$date <- as.Date(mr$date, format = "%Y-%m-%d")
+
+str(mr)
+```
+
+#TIDY TEXT - UNIGRAMS
+
+##Data Preprocessing + Tokenize
+Dataframe to tidy text format 
+- tokenize 
+- remove non-alphabetic characters (numbers & non-english characters) 
+- remove stopwords 
+- lemmatize
+
+STEMMING 
+process of collasping words to a common root, which helps in the comparison and analysis of vocablary 
+tm package uses the porter stemming algorithm 
+
+LEMMATIZATION - takes into consideration the morphological analysis of the words. 
+lemmatize_words() from the textstem package 
+lemmatize_strings() to lemmatize words within a string without extract the words 
+
+By default, unnest_tokens() 
+- converts tokens to lowercase 
+- strip punctuations
+- strip white spaces 
+
+
+```{r}
+#UNNEST_TOKENS into tidy dataset - uses tokenizers package
+review_comments <- mr %>% 
+  unnest_tokens(word, comments) %>% #tokenize
+  filter(!str_detect(word, "[^[:alpha:]]")) %>%
+  anti_join(stop_words, by="word") %>% #remove stopwords 
+  mutate(word_lemma = lemmatize_words(word)) %>% #lemmatize 
+  select(-word)
+
+#Rename word_lemma column to word
+names(review_comments)[names(review_comments) == 'word_lemma'] <- 'word'
+
+head(review_comments,n=20)
+```
+
+Text preprocessing
+```{r}
+#Create custum list of stop words in the form of character vector 
+custom_stop <- tibble(word=c("toronto","airbnb","holiday","vacation","highly","recommend", "stay"))
+
+#remove custom list of stopwords 
+tidy_comments <- review_comments %>%
+  anti_join(custom_stop)
+```
+Count the most popular words 
+```{r}
+tidy_comments %>%
+  count(word, sort = TRUE)
+```
+
+```{r}
+head(tidy_comments$word, n=100)
+```
+
+##Term Frequency 
+
+Count Term frequency
+- there is one row in neighbourhood_words df for each word-neighbourhood combination. 
+```{r}
+neighbourhood_words <- tidy_comments %>%
+  count(neighbourhood, word, sort = TRUE)
+
+total_words <- neighbourhood_words %>%
+  group_by(neighbourhood) %>%
+  summarize(total = sum(n))
+
+neighbourhood_words <- left_join(neighbourhood_words, total_words)
+
+neighbourhood_words
+```
+
+```{r}
+#zif's law states that the frequency that a word appears is inversely proportional to its rank shown below 
+
+freq_by_rank <- neighbourhood_words %>%
+  group_by(neighbourhood) %>%
+  mutate(rank = row_number(), #rank of each word within the freq table 
+         'term frequency' = n/total)
+
+freq_by_rank
+```
+
+##TF-IDF
+
+inverse document frequency (idf), decreases the weight for commonly used words and increases the weight for words that are not used very much in a collection of documents
+- combined with term frequency to calculate a term's tf-idf (two quantities multipled together), the frequency of a term adjusted for how rarely it is used 
+- find important words for the content of each document by decreasing the weight for commonly used words and increasing the weight for words that are not used very much 
+
+```{r}
+#TF-IDF
+neighbourhood_words <- neighbourhood_words %>%
+  bind_tf_idf(word, neighbourhood, n)
+
+neighbourhood_words
+
+#highest tf-idf total 
+neighbourhood_words %>%
+  select(-total) %>%
+  arrange(desc(tf_idf))
+
+#subset top 5 tfidf neighbourhoods 
+top5neigh_tfidf <- subset(neighbourhood_words, neighbourhood == 'Waterfront Communities-The Island'|neighbourhood == 'Niagara'| neighbourhood =='Annex'| neighbourhood == 'Bay Street Corridor'| neighbourhood == 'Church-Yonge Corridor')
+
+top5neigh_tfidf %>%
+  arrange(desc(tf_idf)) %>%
+  mutate(word = factor(word, levels = rev(unique(word)))) %>%
+  group_by(neighbourhood) %>%
+  top_n(15) %>%
+  ungroup() %>%
+  ggplot(aes(word, tf_idf, fill=neighbourhood)) + 
+  geom_col(show.legend=FALSE) + 
+  labs(x=NULL, y="tf-idf") + 
+  facet_wrap(~neighbourhood, ncol=2, scales="free", shrink = TRUE) + 
+  coord_flip()
+```
+Significant:: 
+- waterfront communities highest tf-idf words are cn, tower, condo, view, rogers, arena, scotiabank, acquarium.... shows importance of surrounding neighbourhood 
+- the rest of the neighbourhoods highest tf-idf words are mostly names 
+
+View comments with highest tf-idf words 
+```{r}
+#Raoul - Bay Street Cooridor
+mr %>%
+  filter(str_detect(comments, "Raoul")) %>%
+  select(comments)
+
+#Keir - Church Yonge Cooridor 
+mr %>%
+  filter(str_detect(comments, "Keir")) %>%
+  select(comments)
+```
+
+What if we try removing some names? 
+
+```{r}
+mystopwords <- tibble(word=c("toronto",
+                             "airbnb",
+                             "holiday",
+                             "vacation",
+                             "highly",
+                             "recommend",
+                             "stay",
+                             "todd",
+                             "spencer",
+                             "natasha",
+                             "frank",
+                             "maureen",
+                             "irina",
+                             "jinty",
+                             "jane",
+                             "chris",
+                             "raoul",
+                             "james",
+                             "kyla",
+                             "charmaine",
+                             "connie",
+                             "joan",
+                             "robert",
+                             "matt",
+                             "arjun"))
+
+tidy_comments <- anti_join(tidy_comments, mystopwords, by="word")
+
+#new tfidf 
+tidy_tfidf <- tidy_comments %>% 
+   count(neighbourhood, word, sort=TRUE) #sort by word 
+
+total_tidytfidf <- tidy_tfidf %>%
+  group_by(neighbourhood) %>%
+  summarize(total = sum(n)) #calculate term frequency 
+
+total_tidytfidf <- left_join(tidy_tfidf, total_tidytfidf)
+
+total_tidytfidf <- total_tidytfidf %>%
+  bind_tf_idf(word, neighbourhood, n) #calculate tf-idf 
+
+total_tidytfidf
+
+#top5 neighbourhoods 
+#subset top 5 tfidf neighbourhoods 
+top5neigh_tfidf2 <- subset(total_tidytfidf, neighbourhood == 'Waterfront Communities-The Island'|neighbourhood == 'Niagara'| neighbourhood =='Annex'| neighbourhood == 'Bay Street Corridor'| neighbourhood == 'Church-Yonge Corridor')
+
+top5neigh_tfidf2 %>%
+  arrange(desc(tf_idf)) %>%
+  mutate(word = factor(word, levels = rev(unique(word)))) %>%
+  group_by(neighbourhood) %>%
+  top_n(15) %>%
+  ungroup() %>%
+  ggplot(aes(word, tf_idf, fill=neighbourhood)) + 
+  geom_col(show.legend=FALSE) + 
+  labs(x=NULL, y="tf-idf") + 
+  facet_wrap(~neighbourhood, ncol=2, scales="free", shrink = TRUE) + 
+  coord_flip()
+```
+
+Still getting a good amount of names, however, names can be significant. They identify super hosts. 
+
+ 
+PLOT MOST COMMON WORDS - unigram
+```{r}
+tidy_comments %>% 
+  count(word, sort = TRUE) %>%
+  filter(n > 50000) %>%
+  mutate(word = reorder(word,n)) %>%
+  ggplot(aes(word, n)) + 
+  geom_col(colour="red") + 
+  xlab(NULL) + 
+  coord_flip()
+```
+
+##Wordcloud 
+```{r}
+tidy_comments %>% 
+  count(word) %>% 
+  with(wordcloud(word, n, max.words=80, colors = brewer.pal(8,"Dark2")))
+```
+
+
+
+
+
+
+
+
+#TIDY TEXT Bi-GRAMS - Full dataset 
+
+```{r}
+bigrams <- mr %>%
+  unnest_tokens(bigram, comments, token = "ngrams", n=2)
+
+head(bigrams$bigram, n=50)
+
+#count and filter ngrams
+bigrams %>%
+  count(bigram, sort=TRUE)
+```
+
+use tidyr's separate() to split a column into multiple based on a delimiter. separate into two columns "word1" and "word2" before removing stop words 
+
+```{r}
+library(tidyr)
+
+tidy_bigrams_sep <- bigrams %>%
+  separate(bigram, c("word1","word2"), sep= " ")
+
+head(tidy_bigrams_sep)
+
+#filter stop words and non-alphabetical words 
+tidy_bigrams_sep <- tidy_bigrams_sep %>%
+  filter(!word1 %in% stop_words$word) %>%
+  filter(!word2 %in% stop_words$word) %>%
+  filter(!str_detect(word1, "[^[:alpha:]]")) %>%
+  filter(!str_detect(word2, "[^[:alpha:]]")) %>%
+  filter(!word1 %in% custom_stop$word) %>%
+  filter(!word2 %in% custom_stop$word) %>%
+  mutate(word1 = lemmatize_words(word1)) %>%
+  mutate(word2 = lemmatize_words(word2))
+
+#new bigram counts
+bigram_counts <- tidy_bigrams_sep %>% 
+  count(word1, word2, sort = TRUE)
+
+bigram_counts
+```
+
+Recombine the columns into one using unite() function 
+```{r}
+tidy_bigrams_united <- tidy_bigrams_sep %>% 
+  unite(bigram, word1, word2, sep= " ")
+
+tidy_bigrams_united
+
+tidy_bigrams_united %>% count(bigram) %>% arrange(desc(n))
+#there are non-alphabaetical letters left.... need to remove 
+```
+
+##bigram term tf-idf
+```{r}
+bigram_tf_idf <- tidy_bigrams_united %>%
+  count(neighbourhood, bigram) %>%
+  bind_tf_idf(bigram, neighbourhood, n) %>%
+  arrange(desc(tf_idf))
+
+bigram_tf_idf
+
+#subset top 5 tfidf neighbourhoods 
+top5neigh_bigram <- subset(bigram_tf_idf, neighbourhood == 'Waterfront Communities-The Island'|neighbourhood == 'Niagara'| neighbourhood =='Annex'| neighbourhood == 'Bay Street Corridor'| neighbourhood == 'Church-Yonge Corridor')
+
+#plot top 5 neighbourhoods tf-idf 
+top5neigh_bigram %>%
+  arrange(desc(tf_idf)) %>%
+  mutate(word = factor(bigram, levels = rev(unique(bigram)))) %>%
+  group_by(neighbourhood) %>%
+  top_n(15) %>%
+  ungroup() %>%
+  ggplot(aes(bigram, tf_idf, fill=neighbourhood)) + 
+  geom_col(show.legend=FALSE) + 
+  labs(x=NULL, y="tf-idf") + 
+  facet_wrap(~neighbourhood, ncol=2, scales="free", shrink = TRUE) + 
+  coord_flip()
+```
+
+Bigrams work a lot better in this instance because it takes away all names, and captures significant locations, and opionions
+
+Plot most frequent bigram in a bar graph 
+```{r}
+tidy_bigrams_united %>% 
+  count(bigram) %>%
+  arrange(desc(n)) %>%
+  top_n(15) %>%
+  ggplot(aes(bigram, n)) +
+  geom_bar(stat="identity") + 
+  coord_flip() + 
+  xlab("Bigrams") + 
+  ylab("Frequency") + 
+  ggtitle("Most frequent bigrams")
+```
+
+##Wordcloud - bigram
+```{r}
+tidy_bigrams_united %>%
+  count(bigram) %>% 
+  with(wordcloud(bigram, n, max.words=50, colors = brewer.pal(8,"Dark2")))
+```
+
+-----------
+
+Use bigrams to provide context in sentiment analysis 
+- with bigrams separated, the results are not too significant. 
+
+```{r}
+tidy_bigrams_sep %>%
+  filter(word1 == "perfect") %>%
+  count(word1, word2, sort= TRUE)
+
+#use AFINN lexicon 
+AFINN <- get_sentiments("afinn")
+
+AFINN
+
+perfect_words <- tidy_bigrams_sep %>%
+  filter(word1 == "perfect") %>%
+  inner_join(AFINN, by=c(word2="word")) %>%
+  count(word2, value, sort=TRUE) 
+
+#filter comments with "bad experience"
+mr %>%
+  filter(str_detect(comments, "not like")) %>%
+  select(comments)
+```
+
+Comparison plots 
+```{r}
+library(ggplot2)
+
+#bigrams that start with "perfect" 
+perfect_words %>%
+  mutate(contribution = n* value) %>%
+  arrange(desc(abs(contribution))) %>%
+  head(20) %>%
+  mutate(word2 = reorder(word2, contribution)) %>%
+  ggplot(aes(word2, n * value, fill = n * value > 0)) + 
+  geom_col(show.legend=FALSE) + 
+  xlab("Words preceded by \"perfect\"") + 
+  ylab("Sentiment value * number of occurences") + 
+  coord_flip()
+
+#the 20 words preceded by 'bad' that had the greatest contribution to sentiment values, in either a positive or negative direction 
+```
+
+#WORD SENTIMENT CATEGORIZATION 
+
+In Tidytext - there are three general purpose lexicons (based on unigrams)
+
+##Afinn 
+
+1.) AFINN: The AFINN lexicon assigns words with a score that runs between -5 and 5, with negative scores indicating negative sentiment and positive scores indicating positive sentiment.
+
+```{r}
+#Create custum list of stop words in the form of character vector 
+custom_stop <- tibble(word=c("toronto","airbnb","holiday","vacation","highly","recommend", "stay"))
+
+#UNNEST_TOKENS  
+afinn_reviews <- mr %>% 
+  unnest_tokens(word, comments) %>%
+  filter(!str_detect(word, "[^[:alpha:]]")) %>%
+  anti_join(stop_words, by="word") %>%
+  anti_join(custom_stop, by="word") %>%
+  mutate(word = lemmatize_words(word)) %>%
+  inner_join(get_sentiments("afinn"))
+
+#compute sentiment scores and labels 
+mr %>% 
+  left_join(afinn_reviews %>%
+              group_by(id) %>% 
+              summarize(sentiment=sum(value))) %>%
+  mutate(method="AFINN") %>% 
+  replace_na(list(score=0)) -> mrafinn #replace NA with 0s
+
+summary(mrafinn)
+```
+Some of the scores are negative, neutral (including the outlier of -188) because of non-english characters. 
+
+
+```{r}
+#group by neighbourhood, count reviews per neighbourhood
+mrafinn %>%
+  group_by(neighbourhood) %>% 
+  summarize(countreviews=length(id),
+            mean=mean(score), 
+            sd=sd(score), 
+            min=min(score), 
+            max=max(score)) %>%
+  arrange(-countreviews) -> mrafinn_sum
+```
+
+Calculated sentiment with AFINN lexicon, however, I am unsure how to split into positive, neutral or negative according to the lexicon scores from -5 to 5. 
+
+##Bing 
+
+2.)  Bing: The bing lexicon categorizes words in a binary fashion into positive and negative categories.
+
+```{r}
+#Create custum list of stop words in the form of character vector 
+custom_stop <- tibble(word=c("toronto","airbnb","holiday","vacation","highly","recommend", "stay"))
+
+#UNNEST_TOKENS & calculate bing lexicon sentiment
+bingreviews <- mr %>% 
+  unnest_tokens(word, comments) %>%
+  filter(!str_detect(word, "[^[:alpha:]]")) %>%
+  anti_join(stop_words, by="word") %>%
+  anti_join(custom_stop, by="word") %>%
+  mutate(word = lemmatize_words(word)) %>%
+  inner_join(get_sentiments("bing"))
+
+#count sentiments in separate columns and calculate net sentiment (positive - negative)
+bingsent <- bingreviews %>%
+  group_by(id) %>%
+  count(neighbourhood, sentiment) %>%
+  spread(sentiment, n, fill=0) %>%
+  mutate(sentiment = positive - negative)
+
+#left join sentiments to review df & replace NAs with 0 
+mr %>% 
+  left_join(bingsent) %>%
+  replace_na(list(negative=0, positive=0, sentiment=0)) -> mrbing
+```
+- performed sentiment analysis using bing dictionary 
+- calcuated net sentiment (positive - negative) 
+- left joined onto mr = mrbing final df 
+
+
+Comparison cloud
+```{r}
+library(reshape2)
+
+bingreviews %>%
+  count(word, sentiment, sort= TRUE) %>%
+  acast(word ~ sentiment, value.var="n", fill=0) %>%
+  comparison.cloud(colors=c("gray20","gray80"),
+                   max.words = 100)
+```
+
+```{r}
+bingnegative <- bingreviews %>%
+  filter(sentiment == "negative")
+
+head(bingnegative, n=20)
+```
+
+
+##SentimentR 
+
+```{r}
+library(sentimentr)
+
+gs <- get_sentences(mayreviews$comments) #get sentences from character vector 
+
+sentimentout <- sentiment_by(gs)
+sentimentout %>%
+  top_n(n=20) %>%
+  arrange(-ave_sentiment) 
+```
+
+
+
