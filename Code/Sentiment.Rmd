@@ -652,12 +652,48 @@ normalize <- function(x) {
 dfn$afinnsentiment_norm <- normalize(dfn$afinnsentiment)
 dfn$bingsentiment_norm <- normalize(dfn$bingsentiment)
 dfn$nrcsentiment_norm <- normalize(dfn$nrcsentiment)
-dfn$ave_sentiment_norm <- normalize(dfn$ave_sentiment) 
+dfn$ave_sentiment_norm <- normalize(dfn$ave_sentiment) #did not work 
 
 boxplot(dfn$afinnsentiment_norm, dfn$bingsentiment_norm, dfn$nrcsentiment_norm, dfn$ave_sentiment_norm)
 
-View(dfn)
+View(dfn) 
 ```
+
+```{r}
+#scale data such that mean is 0 and standard deviation is 1 
+head(dfn)
+
+dfn <- subset(dfn, select=-c(afinnsentiment_norm, bingsentiment_norm, nrcsentiment_norm, ave_sentiment_norm))
+
+dfn2 <- dfn %>%
+  mutate_at(c("afinnsentiment","bingsentiment","nrcsentiment","ave_sentiment"),
+            ~(scale(.) %>% as.vector))
+
+summary(dfn2)
+
+boxplot(dfn2$afinnsentiment, dfn2$bingsentiment, dfn2$nrcsentiment, dfn2$ave_sentiment)
+```
+
+#Check for correlation 
+
+```{r}
+str(dfn2)
+
+#change factors into numerical 
+mydfn2 <- data.frame(lapply(dfn2, as.integer))
+head(mydfn2)
+str(mydfn2)
+```
+
+```{r}
+library(PerformanceAnalytics)
+
+chart.Correlation(mydfn2, histogram=TRUE, pch=19)
+```
+
+
+
+
 
 
 
