@@ -417,48 +417,48 @@ perfect_words %>%
 #WORD SENTIMENT CATEGORIZATION 
 
 In Tidytext - there are three general purpose lexicons (based on unigrams)
-
-##Afinn 
-
-1.) AFINN: The AFINN lexicon assigns words with a score that runs between -5 and 5, with negative scores indicating negative sentiment and positive scores indicating positive sentiment.
+- Create custom list of stop words 
+- Tokenize using tidytext 
 
 ```{r}
 #Create custum list of stop words in the form of character vector 
 custom_stop <- tibble(word=c("toronto","airbnb","holiday","vacation","highly","recommend", "stay"))
 
 #UNNEST_TOKENS  
-afinn_reviews <- mr %>% 
+token <- mr %>% 
   unnest_tokens(word, comments) %>%
   filter(!str_detect(word, "[^[:alpha:]]")) %>%
   anti_join(stop_words, by="word") %>%
   anti_join(custom_stop, by="word") %>%
-  mutate(word = lemmatize_words(word)) %>%
-  inner_join(get_sentiments("afinn"))
+  mutate(word = lemmatize_words(word))
 
-#compute sentiment scores and labels 
-mr %>% 
-  left_join(afinn_reviews %>%
-              group_by(id) %>% 
-              summarize(sentiment=sum(value))) %>%
-  mutate(method="AFINN") %>% 
-  replace_na(list(score=0)) -> mrafinn #replace NA with 0s
-
-summary(mrafinn)
 ```
-Some of the scores are negative, neutral (including the outlier of -188) because of non-english characters. 
 
+##Afinn 
+
+1.) AFINN: The AFINN lexicon assigns words with a score that runs between -5 and 5, with negative scores indicating negative sentiment and positive scores indicating positive sentiment.
 
 ```{r}
-#group by neighbourhood, count reviews per neighbourhood
-mrafinn %>%
-  group_by(neighbourhood) %>% 
-  summarize(countreviews=length(id),
-            mean=mean(score), 
-            sd=sd(score), 
-            min=min(score), 
-            max=max(score)) %>%
-  arrange(-countreviews) -> mrafinn_sum
+#run afinn by listing_id 
+afinn <- token %>%
+  inner_join(get_sentiments("afinn")) %>%
+  group_by(listing_id) %>%
+  summarise(afinnsentiment = sum(value))
+
+summary(afinn)
+
+#view split of polarity level 
+afinn %>%
+  mutate(polarity_level = ifelse(sentiment > 0, "Positive","Negative")) %>%
+  count(polarity_level) 
+
+
+#left join afinn to df & replace NAs with 0 
+dfn %>% 
+  left_join(afinn) %>%
+  replace_na(list(afinnsentiment=0)) -> dfn
 ```
+Some of the scores are negative, neutral (including the outlier of -188) because of non-english characters. 
 
 Calculated sentiment with AFINN lexicon, however, I am unsure how to split into positive, neutral or negative according to the lexicon scores from -5 to 5. 
 
@@ -467,33 +467,29 @@ Calculated sentiment with AFINN lexicon, however, I am unsure how to split into 
 2.)  Bing: The bing lexicon categorizes words in a binary fashion into positive and negative categories.
 
 ```{r}
-#Create custum list of stop words in the form of character vector 
-custom_stop <- tibble(word=c("toronto","airbnb","holiday","vacation","highly","recommend", "stay"))
-
 #UNNEST_TOKENS & calculate bing lexicon sentiment
-bingreviews <- mr %>% 
-  unnest_tokens(word, comments) %>%
-  filter(!str_detect(word, "[^[:alpha:]]")) %>%
-  anti_join(stop_words, by="word") %>%
-  anti_join(custom_stop, by="word") %>%
-  mutate(word = lemmatize_words(word)) %>%
-  inner_join(get_sentiments("bing"))
+token %>%
+  inner_join(get_sentiments("bing")) -> bingreviews
 
 #count sentiments in separate columns and calculate net sentiment (positive - negative)
 bingsent <- bingreviews %>%
-  group_by(id) %>%
+  group_by(listing_id) %>% #grouped by listing_id 
   count(neighbourhood, sentiment) %>%
   spread(sentiment, n, fill=0) %>%
-  mutate(sentiment = positive - negative)
+  mutate(bingsentiment = positive - negative)
+
+summary(bingsent)
+
+bing <- subset(bingsent, select=c(listing_id, bingsentiment))
 
 #left join sentiments to review df & replace NAs with 0 
-mr %>% 
-  left_join(bingsent) %>%
-  replace_na(list(negative=0, positive=0, sentiment=0)) -> mrbing
+dfn %>% 
+  left_join(bing) %>%
+  replace_na(list(bingsentiment=0)) -> dfn
 ```
 - performed sentiment analysis using bing dictionary 
 - calcuated net sentiment (positive - negative) 
-- left joined onto mr = mrbing final df 
+- left joined onto dfn
 
 
 Comparison cloud
@@ -514,8 +510,35 @@ bingnegative <- bingreviews %>%
 head(bingnegative, n=20)
 ```
 
+##NRC 
+```{r}
+token %>%
+  inner_join(get_sentiments("nrc") %>%
+             filter(sentiment %in% c("positive","negative"))) -> nrcreviews
 
-##SentimentR 
+nrcsent <- nrcreviews %>%
+  group_by(listing_id) %>%
+  count(neighbourhood, sentiment) %>%
+  spread(sentiment, n, fill=0) %>%
+  mutate(nrcsentiment = positive-negative)
+
+summary(nrcsent)
+
+nrc <- subset(nrcsent, select = c(listing_id, neighbourhood, nrcsentiment))
+
+#left join sentiments to review df & replace NAs with 0 
+dfn %>% 
+  left_join(nrc) %>%
+  replace_na(list(nrcsentiment=0)) -> dfn
+```
+
+##Using SentimentR 
+- used to calculate text polarity sentiment at the sentence level (can aggregate by rows or grouping variables)
+
+WHY sentimentR? 
+- takes into account valence shifters (negators, amplifiers, deamplifiers, and adversative conjunctions) 
+https://github.com/trinker/sentimentr
+
 
 ```{r}
 library(sentimentr)
@@ -525,7 +548,115 @@ gs <- get_sentences(mayreviews$comments) #get sentences from character vector
 sentimentout <- sentiment_by(gs)
 sentimentout %>%
   top_n(n=20) %>%
-  arrange(-ave_sentiment) 
+  arrange(-ave_sentiment) #output top 20 arranged by highest sentiment score 
+
+summary(sentimentout$ave_sentiment)
+```
+
+
+```{r}
+#Extract sentiment keywords 
+sentimentterms <- extract_sentiment_terms(gs)
+head(sentimentterms, n=20)
+```
+
+##Analyze Sentiment
+
+Histogram at the sentiment of the reviews 
+```{r}
+library(ggplot2)
+
+qplot(sentimentout$ave_sentiment,
+      geom="histogram",
+      binwidth=0.1,
+      main="Review Sentiment Histogram")
+
+#density plot
+sentimentout %>%
+  ggplot() + 
+  geom_density(aes(ave_sentiment))
+```
+
+```{r}
+sentimentout %>%
+  mutate(polarity_level = ifelse(ave_sentiment > 0, "Positive","Negative")) %>%
+  count(polarity_level) 
+```
+
+```{r}
+sentimentout %>% highlight() -> highlight
+```
+Saved in -- 
+/var/folders/dt/bqkhtfg16vb5qzqswk4sn2m00000gp/T//RtmpeGb4b8/polarity.html
+
+```{r}
+#aggregate by neighbourhood 
+mr %>%
+  get_sentences() %>%
+  sentiment_by(by=c("neighbourhood")) -> sn
+```
+
+```{r}
+#aggregate by listing id 
+mr %>% 
+  get_sentences() %>%
+  sentiment_by(by=c("listing_id")) -> sl
+
+summary(sl$ave_sentiment)
+
+#histogram
+library(ggplot2)
+
+qplot(sl$ave_sentiment,
+      geom="histogram",
+      binwidth=0.1,
+      main="Review Sentiment Histogram")
+
+#density plot
+sl %>%
+  ggplot() + 
+  geom_density(aes(ave_sentiment))
+
+#view split of polarity level 
+sl %>%
+  mutate(polarity_level = ifelse(ave_sentiment > 0, "Positive","Negative")) %>%
+  count(polarity_level) 
+
+#check for NAs
+colSums(is.na(sl)|sl == '')
+```
+
+```{r}
+sln <- subset(sl, select = c(listing_id, ave_sentiment))
+
+#left join sl to df & replace NAs with 0 
+dfn %>% 
+  left_join(sln) %>%
+  replace_na(list(ave_sentiment=0)) -> dfn
+```
+
+There are 4250 missing values in Review_per_month, word_count, ave sentiment, last_review and 4663 in sd. Should we remove these listings or impute them? 
+
+##normalize 
+
+```{r}
+summary(dfn)
+#not normalized data 
+boxplot(dfn$afinnsentiment, dfn$bingsentiment, dfn$nrcsentiment, dfn$ave_sentiment)
+
+#normalize numbers then boxplot again 
+normalize <- function(x) {
+  return((x - min(x)) / max(x) - min(x))
+}
+
+dfn$afinnsentiment_norm <- normalize(dfn$afinnsentiment)
+dfn$bingsentiment_norm <- normalize(dfn$bingsentiment)
+dfn$nrcsentiment_norm <- normalize(dfn$nrcsentiment)
+dfn$ave_sentiment_norm <- normalize(dfn$ave_sentiment) 
+
+boxplot(dfn$afinnsentiment_norm, dfn$bingsentiment_norm, dfn$nrcsentiment_norm, dfn$ave_sentiment_norm)
+
+View(dfn)
 ```
 
 
