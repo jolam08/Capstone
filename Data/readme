@@ -1,1 +1,12 @@
+Three datasets are needed for this analysis. 
 
+The first two datasets needed are Maylistings_short.csv which you can find in this datafolder, and the second is Mayreviews.csv. 
+This dataset was too large to upload but can be found on insideairbnb.com or at the following link: 
+http://data.insideairbnb.com/canada/on/toronto/2020-05-07/visualisations/listings.csv
+
+Listings and Reivews dataset will be run at the top of the code. 
+
+Third dataset: 
+DFclean_sentiment.csv 
+
+This will be run later into the code at the Sentiment Classification Machine Learning Algorithms Section. 
