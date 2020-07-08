@@ -1,7 +1,11 @@
-In the code folder, I have included three .rmd files. The following is an explanation of each file and order of which to execute. 
+There is one .rmd file uploaded for Initial Code and Results. 
 
-Exploratory Code: This file contains exploratory data on both the maylistings.csv and mayreviews.csv. Variables are also preprocessed in this code (handling of missing data and outliers), and a final clean dataset is written. 
+There are three datasets used in this code. The raw data (2 datasets) is scraped on May 2020. 
+- Maylistings and Mayreviews is from insideairbnb.com 
+- DFclean_Sentiment.csv is an organic dataset saved from exploratory data and sentiment analysis. 
 
-Sentiment Code: This file contains sentiment analysis of the comments section of Mayreviews.csv. Exploratory data using unigram, bigram,  and tf-idf is performed. Lastly, sentiment analysis using 4 lexicon dictionaries are performed to obtain a "positive" or "negative" of each listing. 
-
-Classification Code: This file contains machine learning algorithms on sentiment classification. The ML models used are: Naive Bayes, Random Forest and Logistic Regression. 
+This code includes 
+- exploratory analysis
+- sentiment analysis on airbnb Toronto reviews (including preprocessing)
+- sentiment classification 
+- building a sentiment classification model using ML algorithms 
