@@ -1,0 +1,563 @@
+---
+title: "Classification"
+output: html_document
+---
+
+In this code: 
+- Classifying sentiment dictionary scores into a "Positive" or "Negative" for each listing 
+- Resampling imbalanced dataset
+- Sentiment classification using three different ML models: Naive Bayes, Random Forest, Logistic Regression 
+
+#Load packages 
+
+```{r, echo=FALSE} 
+library(dplyr)
+library(ggplot2)
+library(tm)
+library(tidytext)
+library(textstem)
+library(tidyr)
+```
+
+```{r setup, include=FALSE}
+dfclass <- read.csv("/Users/Joanne/Documents/ChangSchool/Capstone/dfclean_sentiment.csv", stringsAsFactors = FALSE)
+
+head(dfclass)
+dfclass <- subset(dfclass, select=-c(X, price, minimum_nights))
+dfclass <- right_join(dfclass, subsetregion) #subset region from exploratory code
+
+names(dfclass)
+```
+
+
+The four lexicon dictionaries used in sentiment analysis is AFINN, BING, NRC and SentimentR sentence analysis. NRC, Bing and Afinn are calculated by words. SentimentR is calculated by sentences.
+
+```{r}
+summary(dfclass$afinnsentiment)
+summary(dfclass$bingsentiment)
+summary(dfclass$nrcsentiment)
+summary(dfclass$ave_sentiment)
+```
+
+Categorizing scores into positive and negative by inputting positive(1)/negative(0) for each dictionaries. 
+
+```{r}
+#Write function to change to positive(1) or negative(0)
+SentimentFun <- function(x){
+  ifelse(x>0, "1","0")
+}
+
+sent <- data.frame(dfclass, lapply(dfclass[13:16], SentimentFun))
+
+#convert dictionary factor columns to numeric
+sent$afinnsentiment.1 <- as.numeric(as.character(sent$afinnsentiment.1))
+sent$bingsentiment.1 <- as.numeric(as.character(sent$bingsentiment.1))
+sent$nrcsentiment.1 <- as.numeric(as.character(sent$nrcsentiment.1))
+sent$ave_sentiment.1 <- as.numeric(as.character(sent$ave_sentiment.1))
+
+str(sent)
+```
+
+```{r}
+head(sent)
+
+#Sum up lexicon scores 
+sent %>%
+  mutate(total_score = rowSums(.[18:21])) -> sent
+
+#function to return positive if the sum of lexicon scores of the four variables is greater than or equal to 2 (two dictionaries output as positive). 
+sent %>% 
+  rowwise() %>%
+  mutate(totalsent= ifelse(total_score >= 2, "Positive","Negative")) -> sent
+
+#class distribution of classification
+prop.table(table(sent$totalsent))
+names(sent)
+```
+
+```{r}
+#save dataframe with sentiment scores/classification and void unneeded attributes
+dfsent.final <- subset(sent, select=-c(host_id, neighbourhood, latitude, longitude, last_review, afinnsentiment, bingsentiment, nrcsentiment, ave_sentiment, afinnsentiment.1, bingsentiment.1, nrcsentiment.1, ave_sentiment.1, total_score))
+
+write.csv(dfsent.final, "classificationdf.csv", row.names = FALSE)
+```
+
+--------------------------------------------------
+
+#Sentiment Classification
+To build a model in order to classify a airbnb listing as positive or negative by their listing attributes such as neighbourhood, price, minimum nights, number of reviews, reviews per month, etc 
+
+Three models are being tested: 
+- Naive Bayes 
+- Random Forest 
+- Logistic Regression 
+
+```{r}
+library(caret)
+airbnb <- read.csv("classificationdf.csv")
+str(airbnb)
+```
+##Pre-processing 
+
+Standardize number of reviews, capped price and capped minimum nights 
+
+```{r}
+airbnb <- airbnb %>%
+  mutate_at(c("number_of_reviews","calculated_host_listings_count","capped_price","capped_minimum_nights"),
+            ~(scale(.) %>% as.vector))
+```
+
+##Data visualization 
+```{r, echo=FALSE}
+#visual 1 - room type
+ggplot(airbnb, aes(room_type, fill=totalsent, color=totalsent)) + 
+  geom_histogram(stat="count") + labs(title="Room type by Sentiment") + 
+  theme_bw()
+
+#visual 2 - capped_ price 
+ggplot(airbnb, aes(capped_price, fill=totalsent, color=totalsent)) + 
+  geom_histogram(binwidth=1) + labs(title = "Price by Sentiment") + 
+  theme_bw() 
+
+#visual 3 - capped_minimum nights
+ggplot(airbnb, aes(capped_minimum_nights, fill=totalsent, color=totalsent)) + 
+  geom_histogram(binwidth=1) + labs(title = "Minimum Nights by Sentiment") + 
+  theme_bw() 
+
+#visual 4 - number of reviews 
+ggplot(airbnb, aes(number_of_reviews, fill=totalsent, color=totalsent)) + 
+  geom_histogram(binwidth=1) + labs(title = "# of reviews by Sentiment") + 
+  theme_bw()
+
+#visual 5 - reviews per month 
+ggplot(airbnb, aes(reviews_per_month, fill=totalsent, color=totalsent)) + 
+  geom_histogram(binwidth=1) + labs(title = "Reviews per month by Sentiment") + 
+  theme_bw() 
+
+#visual 6 - host listings count
+ggplot(airbnb, aes(calculated_host_listings_count, fill=totalsent, color=totalsent)) + 
+  geom_histogram(binwidth=1) + labs(title = "Host Listing count by Sentiment") + 
+  theme_bw() 
+
+#Using GGpairs plot correlation 
+library(GGally)
+ggpairs(airbnb, columns=c("capped_minimum_nights", "number_of_reviews","totalsent"))
+```
+- correlation coefficients 
+- density plots for numeric continuous variables 
+
+```{r}
+#install.packages("DataExplorer")
+library(DataExplorer)
+plot_correlation(airbnb)
+plot_histogram(airbnb)
+```
+
+```{r}
+#check for biases 
+prop.table(table(airbnb$totalsent))
+```
+There is a huge class imbalance here: 
+4% negative and 96% positive 
+
+Need to tackle imbalance prior to modeling (using package ROSE)
+
+```{r}
+#Using package ROSE to tackle imbalance data set 
+#install.packages("ROSE")
+library(ROSE)
+library(e1071)
+library(caTools)
+
+#splitting data into training (70%) and test set (30%) prior to tackling class imbalance 
+split <- sort(sample(nrow(airbnb), nrow(airbnb)*.7))
+train <- airbnb[split,]
+test <- airbnb[-split,]
+
+#check class distribution in train set 
+prop.table(table(test$totalsent))
+table(test$totalsent)
+```
+
+##Resampling 
+Using ROSE's package, create train data with the application of 
+1. Oversample (increases size of minority class)
+2. Undersample (reduces size of majority class)
+3. Both over and undersample
+4. ROSE techique, generating data synthetically 
+
+```{r}
+#oversampling - oversample minority class
+data_balanced_over <- ovun.sample(totalsent ~., data=train, method="over", seed=1)$data
+table(data_balanced_over$totalsent)
+
+#undersample - is done without replacement 
+data_balanced_under <- ovun.sample(totalsent ~., data=train, method="under", seed=1)$data
+table(data_balanced_under$totalsent)
+
+#both under and oversample
+data_balanced_both <- ovun.sample(totalsent ~., data=train, method="both", p=0.5, seed=1)$data
+table(data_balanced_both$totalsent)
+
+#ROSE generates data synthetically 
+data_rose <- ROSE(totalsent ~., data=train, seed=1)$data
+table(data_rose$totalsent)
+
+#relevel structure to Factor LVL 2 "Negative" "Positive" 
+data_balanced_over$totalsent <- relevel(data_balanced_over$totalsent, "Negative")
+data_balanced_under$totalsent <- relevel(data_balanced_under$totalsent, "Negative")
+data_balanced_both$totalsent <- relevel(data_balanced_both$totalsent, "Negative")
+data_rose$totalsent <- relevel(data_rose$totalsent, "Negative")
+```
+
+##Naive Bayes
+
+Assumptions: 
+- features being classified are independent of each other 
+
+Advantage: 
+- quick to implement 
+- requires little to no training 
+
+Disadvantage: 
+- assumption of independence is rare in a real world setting 
+
+
+```{r}
+#plot the confusion matrix
+library(ggplot2)
+ggplot(test, aes(totalsent, nb_pred, color=totalsent)) + 
+  geom_jitter(width=0.2, height=0.1, size=2) + 
+  labs(title="Confusion Matrix",
+       subtitle="predicted vs observed",
+       y="Predicted",
+       x="Actual")
+```
+
+```{r}
+#Build Naive Bayes models 
+classifier_nb <- naiveBayes(totalsent ~ ., data=train)
+naive.rose <- naiveBayes(totalsent ~., data=data_rose)
+naive.over <- naiveBayes(totalsent ~., data=data_balanced_over)
+naive.under <- naiveBayes(totalsent ~., data=data_balanced_under)
+naive.both <- naiveBayes(totalsent ~., data=data_balanced_both)
+
+#make predictions on unseen data
+nb_pred <- predict(classifier_nb, test)
+pred.naive.rose <- predict(naive.rose, newdata=test)
+pred.naive.over <- predict(naive.over, newdata=test)
+pred.naive.under <- predict(naive.under, newdata=test)
+pred.naive.both <- predict(naive.both, newdata=test)
+```
+
+Evaluation of Naive Bayes: 
+
+1. Precision: measure of correctness achieved in positive prediction (TP/(TP+FP))
+
+2. Recall: measure of actual observations which are labeled (predicted) correctly (sensitivity TP/(TP+FN))
+
+3. F-measure: combines precision and recall as measure of effectivness of classification in terms of ratio of weighted importance on either recall or precision as determined by B coefficient. 
+
+The above 1,2,3, can be ineffective in answering important questions on classification. Precision does not tell us about negative prediction accuracy. Recall is more interested in knowing actual positives. 
+
+A better measurement for the accuracy of a classification prediction will be the ROC (Receiver Operating Characteristics). Formed by plotting TP rate (Sensitivity) and FP rate (Specificity). 
+
+```{r}
+#using accuracy.meas(ROSE package) for metrics 
+accuracy.meas(test$totalsent, nb_pred)
+accuracy.meas(test$totalsent, pred.naive.rose)
+accuracy.meas(test$totalsent, pred.naive.over)
+accuracy.meas(test$totalsent, pred.naive.under)
+accuracy.meas(test$totalsent, pred.naive.both)
+```
+
+A better measurement for the accuracy of a classification prediction will be the ROC curve (Receiver Operating Characteristics): graphical summary of the overall performance of the model. Formed by plotting TP rate (Sensitivity) and FP rate (Specificity). 
+
+Specificity: TN/ (TN + FP) - Actual negative but predicted positive 
+ROC graph: any points correspond to the performance of a single classifier on a given distribution. It provides a visual representation of benefits (TP) and costs (FP) of a classification data. The Larger the curve, the higher the accuracy. 
+
+
+```{r}
+#ROC curves 
+#AUC original train set 
+roc.curve(test$totalsent, nb_pred, plotit=F)
+
+#AUC ROSE - synthetic data 
+roc.curve(test$totalsent, pred.naive.rose)
+
+#AUC Oversampling 
+roc.curve(test$totalsent, pred.naive.over)
+
+#AUC Undersampling 
+roc.curve(test$totalsent, pred.naive.under)
+
+#AUC both 
+roc.curve(test$totalsent, pred.naive.both)
+```
+When comparing Naive Bayes models with resampling techniques applied, the AUC variance between all techniques are small with the lowest at 0.852 to the highest of 0.855 (oversampling). 
+
+```{r}
+#confusion matrix 
+nb_cm <- table(test$totalsent, nb_pred)
+nb_rose <- table(test$totalsent, pred.naive.rose)
+nb_over <- table(test$totalsent, pred.naive.over)
+nb_under <- table(test$totalsent, pred.naive.under)
+nb_both <- table(test$totalsent, pred.naive.both)
+
+confusionMatrix(nb_cm, positive = "Positive")
+confusionMatrix(nb_rose, positive = "Positive")
+confusionMatrix(nb_over, positive = "Positive")
+confusionMatrix(nb_under, positive = "Positive")
+confusionMatrix(nb_both, positive = "Positive")
+```
+
+All naive bayes models resulted in accuracy above 70% with the highest at 79% without resampling of data (which is prone to overfitting). Amongst the resampled techniques, Both over and undersampling resulted in 76% accuracy. 
+
+However, the kappa (accuracy corrected for chance) is very low (<20%) for all models. 
+
+Lastly,all had a sensitivity rate of over 99% and specificity rate of under 15%. This means the proportion of negative listings that were correctly identified as negative is very low. 
+
+```{r}
+#10 fold cross validation 
+train_index <- sample(1:nrow(ab), 0.6*nrow(ab))
+train.set <- ab[train_index,]
+test.set <- ab[-train_index,]
+
+#create objects x which hold the predictor variables and y which holds response
+x <- train.set[,-9]
+y = train.set$totalsent
+
+model = train(x,y,'nb', trControl = trainControl(method='cv', number=10))
+model
+
+#model evaluation 
+#predict testing set 
+predict <- predict(model, newdata=test.set) #get confusion matrix
+predict_cm <- table(test.set$totalsent, predict)
+confusionMatrix(predict_cm)
+```
+Using 10 fold cross validation presents a higher accuracy rate of 91% and a lower false negative. 
+
+##Random Forest 
+- builts multiple decision trees, and puts them together into a more accurate and stable prediction 
+- the higher the number of trees in the forest, the greater the accuracy of the results 
+- based on the idea of bagging (used to reduce the variation in the predictions by combining the result of multiple decision trees on different sample of the dataset)
+
+```{r}
+#Cross tables to view relations between two variables 
+table(train[,c('totalsent', 'room_type')])
+table(train[,c('totalsent', 'region')])
+```
+
+
+Build models with imbalanced class manipulation using ROSE package 
+
+```{r}
+#install.packages("randomForest")
+library(randomForest)
+
+#Build Random Forest models 
+classifier_rf = randomForest(totalsent ~., data=train, ntree=500)
+rf.rose <- randomForest(totalsent ~., data=data_rose,ntree=500)
+rf.over <- randomForest(totalsent ~., data=data_balanced_over, ntree=500)
+rf.under <- randomForest(totalsent ~., data=data_balanced_under, ntree=500)
+rf.both <- randomForest(totalsent ~., data=data_balanced_both, ntree=500)
+
+#make predictions on test set 
+rf_pred <- predict(classifier_rf, newdata=test)
+pred.rf.rose <- predict(rf.rose, newdata=test)
+pred.rf.over <- predict(rf.over, newdata=test)
+pred.rf.under <- predict(rf.under, newdata=test)
+pred.rf.both <- predict(rf.both, newdata=test)
+
+#roc curve
+roc.curve(test$totalsent, rf_pred) #original
+roc.curve(test$totalsent, pred.rf.rose) #ROSE
+roc.curve(test$totalsent, pred.rf.over) #oversampling
+roc.curve(test$totalsent, pred.rf.under) #undersampling
+roc.curve(test$totalsent, pred.rf.both) #both over/under 
+```
+
+The AUC between before and after resampling can be seen more drastically with Random Forest modeling. The AUC of the original data prior to resampling is merely 0.521, much lower than the others which were all over 0.85. 
+
+A combination of over and under resampling technique yielded the highest AUC of 0.926. 
+
+```{r}
+#confusion matrix
+predict_RF <- table(test$totalsent, rf_pred)
+confusionMatrix(predict_RF, positive = "Positive")
+
+#Rose resampling CM 
+pred_rose_cm <- table(test$totalsent, pred.rf.rose)
+confusionMatrix(pred_rose_cm, positive = "Positive")
+
+#Under resampling 
+pred_under_cm <- table(test$totalsent, pred.rf.under)
+confusionMatrix(pred_under_cm, positive = "Positive")
+
+#Over resampling 
+pred_over_cm <- table(test$totalsent, pred.rf.over)
+confusionMatrix(pred_over_cm, positive = "Positive")
+
+#both over/under resampling 
+pred_both_cm <- table(test$totalsent, pred.rf.both)
+confusionMatrix(pred_both_cm, positive = "Positive")
+```
+
+Oversampling returned the highest accuracy rate of 0.97 and Kappa of 0.583. Both over/under sampling also returned a high accuracy rate of 0.95 and Kappa of 0.583. 
+
+Sensitivity, also known as Recall, is the True Positive Rate (the proportion of listings identified as positive correctly)
+
+Specificity, measures the true Negative Rate, the proportion of listings identified as negative correctly. For this project, our goal is to classify listings as positive or negative to help hosts' improve their listing. Thus, both sensitivity and specificity is important- perhaps with specificity even more important so that if a listing is identified as negative- hosts are aware and can provide change to improve their listing. 
+
+Similar to accuracy rate and kappa, oversampling and both under/over sampling returns the highest specificity rate. 
+
+
+##Logistic Regression 
+- defines probability of an observation belonging to a category or group. 
+
+Assumptions: 
+- dependent variable must be binary 
+- independent variables should be independent of each other 
+- no high intercorrelations (multicollinearity) among the predictors 
+
+
+Fit model with training sets 
+
+```{r}
+#fit logistic regression model with training dataset 
+log.model <- glm(totalsent ~., 
+                 data=train, 
+                 family=binomial(link="logit"))
+
+#log model with ROSE train set 
+log.rose <- glm(totalsent ~., 
+                data=data_rose, 
+                family=binomial(link="logit"))
+
+#log model with over sample 
+log.over <- glm(totalsent ~., 
+                data=data_balanced_over, 
+                family = binomial(link = "logit"))
+
+#log model with under stample
+log.under <- glm(totalsent ~., 
+                 data = data_balanced_under, 
+                 family = binomial(link = "logit"))
+
+#log model with balanced over/under sample 
+log.both <- glm(totalsent ~., 
+                data = data_balanced_both, 
+                family = binomial(link = "logit"))
+
+#summaries 
+summary(log.model)
+summary(log.rose)
+summary(log.over)
+summary(log.under)
+summary(log.both) 
+
+```
+
+```{r}
+#assess multicollinearity using vif from the car package 
+library(car)
+vif(log.rose)
+vif(log.under)
+vif(log.over)
+vif(log.both)
+#VIF that exceeds 5 or 10 indicates high level of collinearity 
+```
+
+There is no collinearity in these models, all variables have a value of VIF under 2. 
+
+```{r}
+#prediction for test data
+log.predictions <- predict(log.model, test, type="response")
+log.rose.pred <- predict(log.rose, test, type="response")
+log.over.pred <- predict(log.over, test, type="response")
+log.under.pred <- predict(log.under, test, type="response")
+log.both.pred <- predict(log.both, test, type="response")
+
+#assign labels with decision rule that if prediction is greater than 0.5, assign 1 else 0
+log.prediction <- ifelse(log.predictions > 0.5, 'Positive', 'Negative')
+log.rose.pred <- ifelse(log.rose.pred > 0.5, 'Positive', 'Negative')
+log.over.pred <- ifelse(log.over.pred > 0.5, 'Positive', 'Negative')
+log.under.pred <- ifelse(log.under.pred > 0.5, 'Positive', 'Negative')
+log.both.pred <- ifelse(log.both.pred >0.5, 'Positive', 'Negative')
+```
+
+Evaluation 
+- Accuracy
+- ROC curve
+- confusion matrix 
+
+```{r}
+#Predict accuracy of model for TEST observation 
+
+#roc curve
+roc.curve(test$totalsent, log.prediction)
+roc.curve(test$totalsent, log.rose.pred)
+roc.curve(test$totalsent, log.over.pred)
+roc.curve(test$totalsent, log.under.pred)
+roc.curve(test$totalsent, log.both.pred)
+
+#Confusion Matrix 
+log_output <- table(test$totalsent, log.prediction)
+log_rose_output <- table(test$totalsent, log.rose.pred)
+log_over_output <- table(test$totalsent, log.over.pred)
+log_under_output <- table(test$totalsent, log.under.pred)
+log_both_output <- table(test$totalsent, log.both.pred)
+
+confusionMatrix(log_output, positive = "Positive")
+confusionMatrix(log_rose_output, positive = "Positive")
+confusionMatrix(log_over_output, positive = "Positive")
+confusionMatrix(log_under_output, positive = "Positive")
+confusionMatrix(log_both_output, positive = "Positive")
+```
+
+Again, resampling techniques yielded the highest AUC of over 0.80. The highest AUC is from over and under resampling of 0.886, however, using both over/under sample also yielded a high AUC of 0.883. 
+
+Accuracy of resampled data is lower for logistic regression, but in the original dataset, the specificity is 0 - meaning none of the listings that are labeled negative was correctly classified as negative. 
+
+Oversampling data logistic regression model yielded at 82% accuracy, kappa at 0.26, and highest specificity at 0.18 (which is still not high compared to other models). 
+
+#Evaluating Three Classification Models 
+
+After resampling technique of both over/under sampling.  
+```{r}
+#Naive Bayes
+roc.curve(test$totalsent, pred.naive.both)
+confusionMatrix(nb_both, positive = "Positive")
+
+#Random Forest 
+roc.curve(test$totalsent, pred.rf.both)
+confusionMatrix(pred_both_cm, positive = "Positive")
+
+#Logistic Regression 
+roc.curve(test$totalsent, log.both.pred)
+confusionMatrix(log_both_output, positive = "Positive")
+```
+Naive Bayes 
+- AUC 0.864
+- Accuracy: 75%
+- Kappa: 0.17
+- Sensitivity: 0.99
+- Specificity: 0.12 
+
+Random Forest 
+- AUC 0.926
+- Accuracy 0.95
+- Kappa 0.583
+- Sensitivity: 0.99 
+- Specificity: 0.45
+
+Logistic Regression 
+- AUC 0.883
+- Accuracy: 0.82
+- Kappa: 0.254
+- Sensitivity: 0.99 
+- Specificity: 0.18 
+
+The best sentiment classification model seems to be Random Forest with a AUC of 0.926. Also important is the highest specificity rate of 0.45, noting its ability to predict negative listings correctly. This is important as to not give hosts a false sense of their listing as positive, but many guests might deem it to be negative. 
+
