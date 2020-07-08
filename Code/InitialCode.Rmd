@@ -1,0 +1,1700 @@
+---
+title: "Exploratory and Preprocessing Code"
+output:
+  html_document: default
+  word_document: default
+---
+
+In this code: 
+- Exploratory data review 
+- Handling outliers and missing values
+- Reduce 140 neighbourhoods into 10 regions 
+- Create maps
+
+
+```{r, include=FALSE}
+
+library(ggmap)
+library(dplyr)
+library(ggplot2)
+library(mapview)
+library(textstem)
+library(stringr)
+library(Hmisc)
+library(Hmisc)
+library(ggpubr)
+library(NCmisc)
+library(tidyverse)
+library(tm)
+library(tidytext)
+library(textstem)
+library(tidyverse)
+library(stringr)
+library(wordcloud)
+library(tidyr)
+library(caret)
+
+register_google(key="AIzaSyBAfwGIFqbBu3Vfjz_nMO3iqmzYQZglyP8")
+```
+
+
+#Read data files 
+```{r}
+mayreviews <- read.csv("/Users/Joanne/Documents/ChangSchool/Capstone/Airbnb/TOlistingfiles/Mayreviews.csv", na.strings="", stringsAsFactors = FALSE)
+maylistings <- read.csv("/Users/Joanne/Documents/ChangSchool/Capstone/Airbnb/TOlistingfiles/maylistings_short.csv", na.strings="")
+```
+
+```{r}
+str(maylistings)
+str(mayreviews)
+
+#rename list id to listing_id so both datasets key matches
+names(maylistings)[1] <- "listing_id"
+names(maylistings)
+```
+
+#Exploratory - listings dataset 
+```{r}
+#remove unneeded variables in maylistings - name, host_name, neighbourhood_group,  availability_365
+#void variables we dont need
+
+df <- subset(maylistings, select= -c(name, host_name, neighbourhood_group, availability_365))
+
+#df has 12 variables 
+str(df)
+```
+
+How many missing values are there? 
+
+```{r}
+#check for NAs
+colSums(is.na(df)|df == '')
+
+#4205 last review & reviews_per_month missing values under comments
+```
+
+Let's take a look at some descriptive information 
+
+```{r}
+#quick descriptive information
+with(df, summary(room_type))
+with(df, summary(price))
+with(df, summary(minimum_nights))
+with(df, summary(number_of_reviews))
+```
+
+##Room Type 
+
+```{r}
+#LISTING GROUPED BY ROOM TYPE
+df %>% 
+  filter(!is.na(room_type)) %>% 
+  group_by(room_type) %>%
+  summarise(nr=length(room_type)) %>% 
+  mutate(percentage = (nr/sum(nr)*100)) %>%
+  ungroup() -> rt
+
+rt
+
+#Create bar graph - library(ggplot2)
+ggplot(data= rt, aes(x = reorder(room_type, nr), y=nr/1000)) +
+  geom_bar(stat="identity", fill="orange", colour="black") + theme_bw(base_size=10) + geom_text(aes(label=nr), vjust=0, nudge_y = 0.5) + 
+  labs(title="Listings grouped by Room Type", x= "Room Type", y="Number of listings")
+```
+
+64% of listings are entire home/apt 
+33% of listings are private rooms 
+1.80% of listings are shared room 
+0.33% are hotel rooms 
+
+##Price 
+
+```{r}
+describe(df$price) #mean 144.6 
+```
+According to the descriptive summary above, variable price contains many outliers. 
+
+Handling outliers: 
+- Replaced outliers by capping at 0.5 quantile and 0.95 quantile 
+
+```{r}
+#boxplot of price 
+outrt = boxplot.stats(df$price)$out #using IQR method to display data and outliers 
+head(which(df$price %in% outrt)) #which numbers are outliers 
+length(outrt) #total amount of outliers - 1625 (7% of total values) 
+
+#handling extreme values that lie outside the 1.5* IQR limits with capping (replacing observations that lie below limit with value of 5th percentile and those that lie above the upper limit with the value of 95th percentile) 
+replace_outliers <- function(x, removeNA=TRUE){ #function to capping outliers 
+  price <- x
+  qnt <- quantile(price, probs=c(.25, .75), na.rm= removeNA)
+  caps <- quantile(price, probs=c(.05, .95), na.rm = removeNA)
+  H <- 1.5 * IQR(price, na.rm = removeNA)
+  price[price < (qnt[1] - H)] <- caps[1]
+  price[price > (qnt[2] + H)] <- caps[2]
+  price
+}
+
+df$capped_price <- replace_outliers(df$price) #capp price on df
+
+#output comparison 
+boxplot(df$price, main="Price with outliers")
+boxplot(df$capped_price, main="price without outliers", boxwex=0.1)
+
+describe(df$capped_price)
+describe(df$price)
+```
+
+
+```{r}
+#how mean price differs based on room type
+RTmeans = with(df, by(capped_price, room_type, mean))
+head(RTmeans)
+
+#how mean price differs based on neighbourhood 
+Nmeans = with(df, by(capped_price, neighbourhood, mean))
+head(Nmeans)
+
+library(ggpubr)
+ggboxplot(df, x="room_type", y="capped_price") #boxplot by room type and price 
+```
+
+
+##minimum nights 
+Explore minimum nights required by listing. 
+
+```{r}
+describe(df$minimum_nights)
+boxplot(df$minimum_nights)
+```
+
+Realistically, those listings above 30 days minimum nights will rarely obtain any requests for stays because it becomes a long term rental.
+
+```{r}
+#boxplot of outliers of minimum nights 
+outmn = boxplot.stats(df$minimum_nights)$out #using IQR method to display data 
+head(which(df$minimum_nights %in% outmn)) #which numbers are outlier
+length(outmn) #total amount of outliers - 3104 (14%)
+
+#return outliers 2SD below and above the mean 
+library(NCmisc)
+length(which.outlier(df$minimum_nights, thr=2, method=c("sd"), high = TRUE, low=TRUE))
+```
+
+Handling outliers: 
+Impute outliers with 2 standard deviation above the mean. Upper bound will become 70 days. Minimum number of days of 1 is a must, thus, no outliers in the lower bound will be imputed.
+
+```{r}
+mean(df$minimum_nights) + (sd(df$minimum_nights)*2) #70
+length(which(df$minimum_nights >70)) #400 above upper bound
+
+#Function to replace outliers with the capping of 2 SD lower and upper bound 
+cap_outliers_mn <- function(x, removeNA=TRUE){ #function to capping outliers 
+  minimum_nights <- x
+  upper <- mean(minimum_nights) + (sd(minimum_nights)*2)
+  minimum_nights[minimum_nights > upper] <- upper[1]
+  minimum_nights
+}
+
+#capp outliers with 2sd upper bound
+capped_minnights <- cap_outliers_mn(df$minimum_nights)
+describe(capped_minnights)
+
+#add into df capped minimum nights column 
+df$capped_minnights <- as.integer(cap_outliers_mn(df$minimum_nights))
+```
+
+##number of reviews 
+Explore number of reviews per listing as of May 2020
+
+```{r}
+describe(df$number_of_reviews)
+boxplot(df$number_of_reviews)
+
+df %>% filter(!is.na(room_type)) %>% #group by room type & count number of reviews 
+  group_by(room_type) %>% 
+  summarise(nr=length(number_of_reviews)) %>%
+  ungroup() -> numr
+
+numr
+
+#boxplot by room type and number of reviews 
+ggboxplot(df, x="room_type", y="number_of_reviews")
+```
+It makes sense that the amount of reviews for entire home/apt is the most as most of the listings are that type of room listing. 
+
+##reviews per month 
+```{r}
+describe(df$reviews_per_month) #missing 4205 values 
+boxplot(df$reviews_per_month)
+
+#replace missing values with 0 
+df$reviews_per_month[is.na(df$reviews_per_month)] <- 0
+
+#boxplot by room type and reviews by month
+ggboxplot(df, x="room_type", y="reviews_per_month")
+```
+
+##last review written date
+```{r}
+describe(df$last_review)
+#missing 4205 
+```
+
+There are 4205 missing values for this variable. In the may review dataset, when we calculate unique values of listing_id. There is 17566- which is the amount left when the missing values are subtracted from the full listing. 
+
+Reasons there might be missing value in this variable
+- new listings thus no one has stayed there yet 
+- have very limited stays but no reviews thus not relevant in this study 
+
+Since we cannot replace the dates with 0's, its best to delete these rows. 
+
+##Clean listings dataframe with imputed values and no missing values
+```{r}
+#remove row listings with last_review missing value 
+dfclean <- na.omit(df, cols="last_review")
+
+#remove original price and minimum nights 
+dfclean <- subset(dfclean, select=-c(price, minimum_nights))
+
+#change last_review to date structure
+dfclean$last_review <- as.Date(dfclean$last_review, format = "%Y-%m-%d")
+
+str(dfclean)
+```
+
+
+##neighbourhoods
+
+First we explore the original dataset with 140 neighbourhoods. 
+
+```{r}
+#top 20 neighbourhoods 
+dfclean %>% group_by(neighbourhood) %>%
+  summarise(nr=length(neighbourhood)) %>% top_n(n=20) %>% 
+  arrange(-nr) %>% ungroup() -> ng
+
+#boxplot of top 20 neighbourhoods 
+ggplot(data=ng, aes(x=reorder(neighbourhood,nr), y=nr)) +
+  geom_bar(stat="identity", fill="grey", colour="black") + 
+  coord_flip() + theme_bw(base_size=10) + 
+  labs(title="Top 20 Toronto neighborhoods (by listings)", y="Number of Listings", x="Neighbourhood")
+
+#top 5 neighbourhoods 
+dfclean %>% group_by(neighbourhood) %>%
+  summarise(nr=length(neighbourhood)) %>% top_n(n=5) %>% 
+  arrange(-nr) %>% ungroup() -> tf
+
+#boxplot of top 5 neighbourhoods 
+ggplot(data=tf, aes(x=reorder(neighbourhood,nr), y=nr)) +
+  geom_bar(stat="identity", fill="grey", colour="black") + 
+  coord_flip() + theme_bw(base_size=10) + 
+  labs(title="Top 5 Toronto neighborhoods (by listings)", y="Number of Listings", x="Neighbourhood")
+```
+
+Subset Top 5 neighbourhoods with the most listings
+
+```{r}
+#Top 5 neighborhoods by listing number 
+dfclean %>% group_by(neighbourhood) %>%
+  summarise(nr=length(neighbourhood)) %>% top_n(n=5) %>% 
+  arrange(-nr) %>% ungroup() -> top5
+top5 #output top 5 neighbourhood
+
+#create new dataframe with top 5 neighbourhood
+top5df <- subset(dfclean, neighbourhood == 'Waterfront Communities-The Island'|neighbourhood == 'Niagara'| neighbourhood =='Annex'| neighbourhood == 'Bay Street Corridor'| neighbourhood == 'Church-Yonge Corridor')
+
+str(top5df)
+```
+
+There are 140 neighbourhoods in Toronto, since many machine learning algorithms do not allow for categories more than a certain number, and for ease of understanding, we may have to subset neighbourhoods into 10 regions. (torontoneighbourhoods.net & toronto.ca) 
+
+Etobicoke 1-20
+North York 21-53
+East York 54-61
+East End  62-70
+Downtown 71-84
+West End 85-93
+Midtown 94-98, 101-102
+Uptown 99, 100, 103,104,105
+York-Crosstown 106-115
+Scarborough 116-140
+
+```{r}
+length(levels(dfclean$neighbourhood))
+
+library(tidyverse)
+#condense 140 neighbourhoods to 10 
+dfclean$region <- fct_collapse(dfclean$neighbourhood, 
+                               'Etobicoke' = c("West Humber-Clairville",
+                                               "Mount Olive-Silverstone-Jamestown",
+                                               "Thistletown-Beaumond Heights",
+                                               "Rexdale-Kipling",
+                                               "Elms-Old Rexdale",
+                                               "Kingsview Village-The Westway",
+                                               "Willowridge-Martingrove-Richview",
+                                               "Humber Heights-Westmount",
+                                               "Edenbridge-Humber Valley",
+                                               "Princess-Rosethorn",
+                                               "Eringate-Centennial-West Deane",
+                                               "Markland Wood",
+                                               "Etobicoke West Mall",
+                                               "Islington-City Centre West",
+                                               "Kingsway South",
+                                               "Stonegate-Queensway",
+                                               "Mimico (includes Humber Bay Shores)",
+                                               "New Toronto",
+                                               "Long Branch",
+                                               "Alderwood"),
+                               'North York' = c("Humber Summit",
+                                                "Humbermede",
+                                                "Pelmo Park-Humberlea",
+                                                "Black Creek",
+                                                "Glenfield-Jane Heights",
+                                                "Downsview-Roding-CFB",
+                                                "York University Heights",
+                                                "Rustic",
+                                                "Maple Leaf",
+                                                "Brookhaven-Amesbury",
+                                                "Yorkdale-Glen Park",
+                                                "Englemount-Lawrence",
+                                                "Clanton Park",
+                                                "Bathurst Manor",
+                                                "Westminster-Branson",
+                                                "Newtonbrook West",
+                                                "Willowdale West",
+                                                "Lansing-Westgate",
+                                                "Bedford Park-Nortown",
+                                                "St.Andrew-Windfields",
+                                                "Bridle Path-Sunnybrook-York Mills",
+                                                "Banbury-Don Mills",
+                                                "Victoria Village",
+                                                "Flemingdon Park",
+                                                "Parkwoods-Donalda",
+                                                "Pleasant View",
+                                                "Don Valley Village",
+                                                "Hillcrest Village",
+                                                "Bayview Woods-Steeles",
+                                                "Newtonbrook East",
+                                                "Willowdale East",
+                                                "Bayview Village",
+                                                "Henry Farm"),
+                               'East York' = c("O'Connor-Parkview",
+                                               "Thorncliffe Park",
+                                               "Leaside-Bennington",
+                                               "Broadview North",
+                                               "Old East York",
+                                               "Danforth East York",
+                                               "Woodbine-Lumsden",
+                                               "Taylor-Massey"),
+                               'East End' = c("East End-Danforth",
+                                              "The Beaches",
+                                              "Woodbine Corridor",
+                                              "Greenwood-Coxwell",
+                                              "Danforth",
+                                              "Playter Estates-Danforth",
+                                              "North Riverdale",
+                                              "Blake-Jones",
+                                              "South Riverdale"),
+                               'Downtown' = c("Cabbagetown-South St.James Town",
+                                              "Regent Park",
+                                              "Moss Park",
+                                              "North St.James Town",
+                                              "Church-Yonge Corridor",
+                                              "Bay Street Corridor",
+                                              "Waterfront Communities-The Island",
+                                              "Kensington-Chinatown",
+                                              "University",
+                                              "Palmerston-Little Italy",
+                                              "Trinity-Bellwoods",
+                                              "Niagara",
+                                              "Dufferin Grove",
+                                              "Little Portugal"),
+                               'West End' = c("South Parkdale",
+                                              "Roncesvalles",
+                                              "High Park-Swansea",
+                                              "High Park North",
+                                              "Runnymede-Bloor West Village",
+                                              "Junction Area",
+                                              "Weston-Pellam Park",
+                                              "Corso Italia-Davenport",
+                                              "Dovercourt-Wallace Emerson-Junction"),
+                               'Midtown' = c("Wychwood",
+                                             "Annex",
+                                             "Casa Loma",
+                                             "Yonge-St.Clair",
+                                             "Rosedale-Moore Park",
+                                             "Forest Hill South",
+                                             "Forest Hill North"),
+                               'Uptown' = c("Mount Pleasant East",
+                                            "Yonge-Eglinton",
+                                            "Lawrence Park South",
+                                            "Mount Pleasant West",
+                                            "Lawrence Park North"),
+                               'York-Crosstown' = c("Humewood-Cedarvale",
+                                                    "Oakwood Village",
+                                                    "Briar Hill-Belgravia",
+                                                    "Caledonia-Fairbank",
+                                                    "Keelesdale-Eglinton West",
+                                                    "Rockcliffe-Smythe",
+                                                    "Beechborough-Greenbrook",
+                                                    "Weston",
+                                                    "Lambton Baby Point",
+                                                    "Mount Dennis"), 
+                               'Scarborough' = c("Steeles",
+                                                 "L'Amoreaux",
+                                                 "Tam O'Shanter-Sullivan",
+                                                 "Wexford/Maryvale",
+                                                 "Clairlea-Birchmount",
+                                                 "Oakridge",
+                                                 "Birchcliffe-Cliffside",
+                                                 "Cliffcrest",
+                                                 "Kennedy Park",
+                                                 "Ionview",
+                                                 "Dorset Park",
+                                                 "Bendale",
+                                                 "Agincourt South-Malvern West",
+                                                 "Agincourt North",
+                                                 "Milliken",
+                                                 "Rouge",
+                                                 "Malvern",
+                                                 "Centennial Scarborough",
+                                                 "Highland Creek",
+                                                 "Morningside",
+                                                 "West Hill",
+                                                 "Woburn",
+                                                 "Eglinton East",
+                                                 "Scarborough Village",
+                                                 "Guildwood")
+)
+
+levels(dfclean$region)
+```
+
+```{r}
+#Explore plots with regions
+#top 20 neighbourhoods 
+dfclean %>% group_by(region) %>%
+  summarise(nr=length(region)) %>% 
+  arrange(-nr) %>% ungroup() -> r
+
+#boxplot of top listings by region 
+ggplot(data=r, aes(x=reorder(region,nr), y=nr)) +
+  geom_bar(stat="identity", fill="grey", colour="black") + 
+  coord_flip() + theme_bw(base_size=10) + 
+  labs(title="Top listings by region", y="Number of Listings", x="Neighbourhood")
+
+
+```
+
+##Toronto MAP 
+packages: get_map and ggmap 
+
+```{r, echo=FALSE}
+#fetch map with location name
+library(ggmap)
+
+#registered google API and activated using register_google() 
+#enabled geocoding API on google cloud 
+#m <- get_map("Toronto",zoom=12, source="google") #get map of toronto
+#ggmap(m)
+
+#Fetch boundary specific map
+bbox <- make_bbox(dfclean$longitude, dfclean$latitude, f=0.05)
+b <- get_map(bbox, maptype = "toner-lite", source="stamen")
+ggmap(b)
+
+#Total TO listings by region 
+ggmap(b) + geom_point(data=dfclean, aes(longitude, latitude, color=region), size=0.01, alpha = 0.7) + labs(x = "Longtitude", y= "Latitude", title="Airbnb Toronto Listing Locations (by region)")
+
+#By region
+bboxfive <- make_bbox(top5df$longitude, top5df$latitude, f=0.05) #boundary specific
+bb <- get_map(bboxfive, maptype = "toner-lite", source="stamen")
+
+ggmap(bb) + geom_point(data=top5df, aes(longitude, latitude, color=neighbourhood), size=0.01, alpha = 0.7) + labs(x = "Longtitude", y= "Latitude", title="Airbnb Toronto Top 5 Listing Locations")
+```
+
+```{r}
+str(dfclean)
+
+subsetregion <- subset(dfclean, select=c(listing_id, region))
+
+#write.csv(dfclean, "dfclean.csv", row.names = FALSE, col.names = FALSE)
+```
+
+#Exploratory - review dataset 
+
+```{r}
+str(mayreviews)
+
+#convert date to an R date class 
+mayreviews$date <- as.Date(mayreviews$date, format = "%Y-%m-%d")
+
+#view R class of data 
+class(mayreviews$date)
+
+#view results 
+head(mayreviews$date)
+
+#new variable- extract YEAR (and convert to numeric format)
+mayreviews$year <- as.numeric(format(mayreviews$date,'%Y'))
+
+#new variable-extract MONTH (and convert to numeric format)
+mayreviews$month <- as.numeric(format(mayreviews$date,'%m'))
+```
+
+Group review by year written 
+```{r}
+mayreviews %>% filter(!is.na(year)) %>% group_by(year) %>%
+  summarise(nr=length(year)) %>% arrange(-year) %>% ungroup() -> yr
+
+yr
+
+ggplot(data=yr, aes(x=year, y=nr)) +
+  geom_line(stat="identity", colour="black", linetype=5, show.legend = TRUE) + 
+  geom_point() + 
+  geom_text(aes(label=nr), size=3, vjust=-0.5, nudge_y=0.5, colour='red') + 
+  theme_bw(base_size=10) + 
+  labs(title="Number of reviews (by Year)", y="Number of Listings") +
+  scale_x_discrete(name = "Year", 
+                   limits = c(seq(2009,2020,by=1)))
+```
+
+
+Break down monthly reviews written in 2019 
+```{r, echo=FALSE}
+mayreviews %>% filter(!is.na(year == '2019')) %>% group_by(month) %>%
+  summarise(nr=length(month)) %>% ungroup() -> mth
+
+mth
+
+#create geom_line of monthly reviews written in 2019 
+ggplot(data=mth, aes(x=month, y=nr)) + 
+  geom_line(stat="identity", colour="black", linetype=5) + 
+  geom_point() + 
+  geom_text(aes(label=nr), vjust=-0.5, nudge_y=0.5, colour='red', size=3) + 
+  theme_bw(base_size=10) + 
+  labs(title="Number of reviews (by month in 2019) ", y="Number of Listings") + 
+  scale_x_discrete(name = "Months", 
+                   limits = c("1"="Jan", 
+                              "2"="Feb", 
+                              "3"= "Mar", 
+                              "4"="April", 
+                              "5"= "May", 
+                              "6"="June", 
+                              "7"= "july",
+                              "8" = "Aug",
+                              "9" = "Sept",
+                              "10" = "Oct",
+                              "11" = "Nov",
+                              "12" = "Dec"
+                              ))
+
+
+#http://www.cookbook-r.com/Graphs/Axes_(ggplot2)/
+#ensure x axis has every month for the label
+```
+
+##Time Series 
+
+```{r, echo=FALSE}
+#Grouping number of reviews by year and month 
+m <- group_by(mayreviews, year, month)
+monthly <- summarise(m, number_reviews=n())
+
+
+ggplot(data=monthly, aes(x=month, y=number_reviews)) + 
+  geom_bar(stat="identity", fill ="darkorchid4") + 
+  facet_wrap( ~ year, ncol = 4) + 
+  labs(title = "Number of Reviews posted in Toronto", 
+       subtitle="By year", 
+       y="Number of reviews", 
+       x="Month") + 
+  theme_bw(base_size = 10) +
+  scale_x_discrete()
+```
+
+Join dfclean with clean reviews dataset 
+```{r}
+reviewsclean <- mayreviews
+head(reviewsclean)
+```
+
+In this code: 
+- Explore Sentiment through Unigrams and Bigrams 
+- Calculate TF-IDF for unigrams/bigrams 
+- Calculate sentiment scores with 4 lexicon dictionaries 
+
+
+#Tidytext- Unigrams 
+```{r}
+head(dfclean)
+#Using clean reviews dataset to explore unigram/bigram and tokenize 
+head(reviewsclean)
+```
+
+Join the two files together by listing_id 
+
+```{r}
+#right outer join by listing_id
+mr <- left_join(dfclean, reviewsclean, by = "listing_id")
+
+#check for missing values 
+colSums(is.na(mr))
+```
+
+##Data Preprocessing + Tokenize
+Dataframe to tidy text format 
+- tokenize 
+- remove non-alphabetic characters (numbers & non-english characters) 
+- remove stopwords 
+- lemmatize
+
+LEMMATIZATION - takes into consideration the morphological analysis of the words. 
+lemmatize_words() from the textstem package 
+lemmatize_strings() to lemmatize words within a string without extract the words
+
+By default, unnest_tokens() 
+- converts tokens to lowercase 
+- strip punctuations
+- strip white spaces 
+
+
+```{r}
+#Create custom list of stop words from english 
+custom_stop_words <- tibble(word=c("toronto","airbnb","holiday","vacation","highly","recommend", "stay"))
+
+#UNNEST_TOKENS into tidy dataset - uses tokenizers package
+review_comments <- mr %>% 
+  unnest_tokens(word, comments) %>% #tokenize
+  filter(!str_detect(word, "[^[:alpha:]]")) %>%
+  anti_join(stop_words, by="word") %>% 
+  anti_join(custom_stop_words, by = "word") %>% #remove stopwords 
+  mutate(word = lemmatize_words(word)) -> tidy_comments #lemmatize 
+
+head(review_comments,n=20)
+```
+
+
+Count the most popular words 
+```{r}
+tidy_comments %>%
+  count(word, sort = TRUE)
+```
+
+
+```{r}
+#calculate term frequency
+neighbourhood_words <- tidy_comments %>%
+  count(neighbourhood, word, sort = TRUE)
+
+#summarize total words by neighbourhood 
+total_words <- neighbourhood_words %>%
+  group_by(neighbourhood) %>%
+  summarise(total=sum(n)) %>% arrange(-total)
+head(total_words, n=10)
+
+neighbourhood_words <- left_join(neighbourhood_words, total_words)
+
+#view term frequency per word/per neighbourhood 
+head(neighbourhood_words, n=10)
+```
+
+```{r}
+#zif's law states that the frequency that a word appears is inversely proportional to its rank shown below 
+#calculate frequency by rank 
+
+freq_by_rank <- neighbourhood_words %>%
+  group_by(neighbourhood) %>%
+  mutate(rank = row_number(), #rank of each word within the freq table 
+         'term frequency' = n/total)
+
+head(freq_by_rank, n=10)
+```
+
+
+Inverse document frequency (idf), decreases the weight for commonly used words and increases the weight for words that are not used very much in a collection of documents
+- combined with term frequency to calculate a term's tf-idf (two quantities multipled together), the frequency of a term adjusted for how rarely it is used 
+- find important words for the content of each document by decreasing the weight for commonly used words and increasing the weight for words that are not used very much 
+
+```{r}
+#calculate TF-IDF
+neighbourhood_words <- neighbourhood_words %>%
+  bind_tf_idf(word, neighbourhood, n)
+
+#view tf-idf dataframe
+head(neighbourhood_words, n=10)
+```
+
+```{r, echo=FALSE}
+#view highest tf-idf total by neighbourhood 
+neighbourhood_words %>%
+  select(-total) %>%
+  arrange(desc(tf_idf))
+
+#subset top 5 tfidf neighbourhoods 
+top5neigh_tfidf <- subset(neighbourhood_words, neighbourhood == 'Waterfront Communities-The Island'|neighbourhood == 'Niagara'| neighbourhood =='Annex'| neighbourhood == 'Bay Street Corridor'| neighbourhood == 'Church-Yonge Corridor')
+
+#Facet graph of top 5 neighbourhoods with their highest tf-idf words 
+top5neigh_tfidf %>%
+  arrange(desc(tf_idf)) %>%
+  mutate(word = factor(word, levels = rev(unique(word)))) %>%
+  group_by(neighbourhood) %>%
+  top_n(15) %>%
+  ungroup() %>%
+  ggplot(aes(word, tf_idf, fill=neighbourhood)) + 
+  geom_col(show.legend=FALSE) + 
+  labs(x=NULL, y="tf-idf") + 
+  facet_wrap(~neighbourhood, ncol=2, scales="free", shrink = TRUE) + 
+  coord_flip()
+```
+Significant:: 
+- waterfront communities highest tf-idf words are cn, tower, condo, view, rogers, arena, scotiabank, acquarium.... shows importance of surrounding neighbourhood 
+- the rest of the neighbourhoods highest tf-idf words are mostly names 
+
+View comments with highest tf-idf words 
+```{r}
+#Raoul - Bay Street Cooridor
+mr %>%
+  filter(str_detect(comments, "Raoul")) %>%
+  select(comments) -> Raoulcomments
+
+head(Raoulcomments)
+
+Raoulcomments#Keir - Church Yonge Cooridor 
+mr %>%
+  filter(str_detect(comments, "Keir")) %>%
+  select(comments) -> Keircomments
+
+head(Keircomments)
+```
+
+- The above shows both Raoul and Keir are superhosts.
+
+What if we try removing some names? 
+
+```{r}
+mystopwords <- tibble(word=c("toronto",
+                             "airbnb",
+                             "holiday",
+                             "vacation",
+                             "highly",
+                             "recommend",
+                             "stay",
+                             "todd",
+                             "spencer",
+                             "natasha",
+                             "frank",
+                             "maureen",
+                             "irina",
+                             "jinty",
+                             "jane",
+                             "chris",
+                             "raoul",
+                             "james",
+                             "kyla",
+                             "charmaine",
+                             "connie",
+                             "joan",
+                             "robert",
+                             "matt",
+                             "arjun"))
+
+#remove mystopwords from comments
+tidy_comments <- anti_join(tidy_comments, mystopwords, by="word")
+
+#new tfidf 
+tidy_tfidf <- tidy_comments %>% 
+   count(neighbourhood, word, sort=TRUE) #sort by word 
+
+#calculate term frequency by neighbourhood 
+total_tidytfidf <- tidy_tfidf %>%
+  group_by(neighbourhood) %>%
+  summarise(total=sum(n))
+
+#join 
+total_tidytfidf <- left_join(tidy_tfidf, total_tidytfidf)
+
+#calculate tf-idf 
+total_tidytfidf <- total_tidytfidf %>%
+  bind_tf_idf(word, neighbourhood, n) 
+
+head(total_tidytfidf, n=10)
+
+#top5 neighbourhoods 
+#subset top 5 tfidf neighbourhoods 
+top5neigh_tfidf2 <- subset(total_tidytfidf, neighbourhood == 'Waterfront Communities-The Island'|neighbourhood == 'Niagara'| neighbourhood =='Annex'| neighbourhood == 'Bay Street Corridor'| neighbourhood == 'Church-Yonge Corridor')
+
+#View facet plot of top 5 neighbourhood with their tf-idf after removing names 
+top5neigh_tfidf2 %>%
+  arrange(desc(tf_idf)) %>%
+  mutate(word = factor(word, levels = rev(unique(word)))) %>%
+  group_by(neighbourhood) %>%
+  top_n(15) %>%
+  ungroup() %>%
+  ggplot(aes(word, tf_idf, fill=neighbourhood)) + 
+  geom_col(show.legend=FALSE) + 
+  labs(x=NULL, y="tf-idf") + 
+  facet_wrap(~neighbourhood, ncol=2, scales="free", shrink = TRUE) + 
+  coord_flip()
+```
+
+Still getting many names as adding top td-idf names onto stopwords only allows other names to come up onto the top 10 tf-idf, however, names can be significant. because they identify superhosts. Thus, can look into what type of comments these superhosts are receiving and why they are as popular as they are.  
+
+```{r, echo=FALSE}
+#PLOT MOST COMMON WORDS - unigram
+tidy_comments %>% 
+  count(word, sort = TRUE) %>%
+  filter(n > 50000) %>%
+  mutate(word = reorder(word,n)) %>%
+  ggplot(aes(word, n)) + 
+  geom_col(fill="grey") + 
+  xlab("Word") +
+  ylab("Frequency") + 
+  coord_flip()
+```
+
+```{r, echo=FALSE}
+#Wordcloud of unigrams
+tidy_comments %>% 
+  count(word) %>% 
+  with(wordcloud(word, n, max.words=80, colors = brewer.pal(8,"Dark2")))
+```
+
+#TIDY TEXT Bi-GRAMS
+
+```{r}
+#tokenize bigrams using unnest_tokens
+bigrams <- mr %>%
+  unnest_tokens(bigram, comments, token = "ngrams", n=2)
+
+#count and filter ngrams
+bigrams %>%
+  count(bigram, sort=TRUE)
+```
+
+use tidyr's separate() to split a column into multiple based on a delimiter. separate into two columns "word1" and "word2" before removing stop words 
+
+```{r}
+library(tidyr)
+
+#split words into two columns to remove stop words 
+tidy_bigrams_sep <- bigrams %>%
+  separate(bigram, c("word1","word2"), sep= " ")
+
+#filter stop words and non-alphabetical words 
+tidy_bigrams_sep <- tidy_bigrams_sep %>%
+  filter(!word1 %in% stop_words$word) %>%
+  filter(!word2 %in% stop_words$word) %>%
+  filter(!str_detect(word1, "[^[:alpha:]]")) %>%
+  filter(!str_detect(word2, "[^[:alpha:]]")) %>%
+  filter(!word1 %in% custom_stop_words$word) %>%
+  filter(!word2 %in% custom_stop_words$word) %>%
+  mutate(word1 = lemmatize_words(word1)) %>%
+  mutate(word2 = lemmatize_words(word2))
+
+#new bigram counts
+bigram_counts <- tidy_bigrams_sep %>% 
+  count(word1, word2, sort = TRUE)
+
+bigram_counts
+```
+
+
+```{r}
+#recombine columns using unite() function 
+tidy_bigrams_united <- tidy_bigrams_sep %>% 
+  unite(bigram, word1, word2, sep= " ")
+
+#count bigrams 
+tidy_bigrams_united %>% count(bigram) %>% arrange(desc(n))
+```
+
+
+```{r}
+#calculate bigram tf-idf
+bigram_tf_idf <- tidy_bigrams_united %>%
+  count(neighbourhood, bigram) %>%
+  bind_tf_idf(bigram, neighbourhood, n) %>%
+  arrange(desc(tf_idf))
+
+head(bigram_tf_idf, n=10)
+
+#subset top 5 tfidf neighbourhoods 
+top5neigh_bigram <- subset(bigram_tf_idf, neighbourhood == 'Waterfront Communities-The Island'|neighbourhood == 'Niagara'| neighbourhood =='Annex'| neighbourhood == 'Bay Street Corridor'| neighbourhood == 'Church-Yonge Corridor')
+
+head(top5neigh_bigram)
+
+#plot top 5 neighbourhoods tf-idf 
+top5neigh_bigram %>%
+  arrange(desc(tf_idf)) %>%
+  mutate(word = factor(bigram, levels = rev(unique(bigram)))) %>%
+  group_by(neighbourhood) %>%
+  top_n(15) %>%
+  ungroup() %>%
+  ggplot(aes(bigram, tf_idf, fill=neighbourhood)) + 
+  geom_col(show.legend=FALSE) + 
+  labs(x=NULL, y="tf-idf") + 
+  facet_wrap(~neighbourhood, ncol=2, scales="free", shrink = TRUE) + 
+  coord_flip()
+```
+
+Bigrams work a lot better in this instance because it takes away all names, and captures significant locations, and opionions
+
+
+```{r, echo=FALSE}
+#plot more frequent bigram in a bar graph
+tidy_bigrams_united %>% 
+  count(bigram) %>%
+  arrange(desc(n)) %>%
+  top_n(15) %>%
+  ggplot(aes(bigram, n)) +
+  geom_bar(stat="identity") + 
+  coord_flip() + 
+  xlab("Bigrams") + 
+  ylab("Frequency") + 
+  ggtitle("Most frequent bigrams")
+```
+
+
+```{r}
+library(dplyr)
+#wordcloud
+tidy_bigrams_united %>%
+  count(bigram) %>% 
+  with(wordcloud(bigram, n, max.words=25, colors = brewer.pal(8,"Dark2")))
+```
+
+-----------
+
+Use bigrams to provide context in sentiment analysis 
+
+```{r}
+tidy_bigrams_sep %>%
+  filter(word1 == "bad") %>%
+  count(word1, word2, sort= TRUE)
+
+#use AFINN lexicon 
+AFINN <- get_sentiments("afinn")
+
+#joining AFINN with tidy_bigrams_sep
+bad_words <- tidy_bigrams_sep %>%
+  filter(word1 == "bad") %>%
+  inner_join(AFINN, by=c(word2="word")) %>%
+  count(word2, value, sort=TRUE) 
+
+head(bad_words) 
+```
+Looking at the AFINN value for each word that has "bad" as the first word in the bigram. Because AFINN calculates single words, a word such as "luck" has a positive value, but when combined with bad to form "bad luck", it does not equate to a positive experience. This is why bigrams may prove to be more significant in reviewing comments. 
+
+```{r}
+#filter comments with "bad luck"
+mr %>%
+  filter(str_detect(comments, "bad luck")) %>%
+  select(listing_id, neighbourhood, room_type, last_review, capped_price, calculated_host_listings_count, region, date, comments) -> badluckcomments
+
+names(mr)
+badluckcomments
+```
+
+
+```{r}
+#Comparison Plots 
+library(ggplot2)
+
+#bigrams that start with "bad" 
+bad_words %>%
+  mutate(contribution = n* value) %>%
+  arrange(desc(abs(contribution))) %>%
+  head(20) %>%
+  mutate(word2 = reorder(word2, contribution)) %>%
+  ggplot(aes(word2, n * value, fill = n * value > 0)) + 
+  geom_col(show.legend=FALSE) + 
+  xlab("Words preceded by \"bad\"") + 
+  ylab("Sentiment value * number of occurences") + 
+  coord_flip()
+```
+
+In viewing this comparison plot, as mentioned, bad luck is viewed as positive but in reality- it may not be positive. Some of the other words also need to be reviewed, as "bad woo" or "bad enjoy" are not two words that generally go together. 
+
+On the negative end, "badass" is viewed as a positive experience in a social setting, as "bad bad" is not generally a word used. Again, more filters may need to be conducted in order to come up with realiable comparison graphs. 
+
+#WORD SENTIMENT CLASSIFICATION
+
+In Tidytext - there are three general purpose lexicons (based on unigrams)
+- Create custom list of stop words 
+- Tokenize using tidytext 
+
+##Afinn 
+
+1.) AFINN: The AFINN lexicon assigns words with a score that runs between -5 and 5, with negative scores indicating negative sentiment and positive scores indicating positive sentiment.
+
+```{r}
+#run afinn by listing_id (with tokenized dataframe review_comments from exploring unigrams)
+afinn <- review_comments %>%
+  inner_join(get_sentiments("afinn"))
+
+#group by listing, count sentiment (positive minus negative for total number)
+afinnlevels <- afinn %>%
+  group_by(listing_id) %>%
+  summarise(afinnsentiment=sum(value))
+
+#left join afinn to dfclean & replace NAs with 0 
+dfclean %>% 
+  left_join(afinnlevels) %>%
+  replace_na(list(afinnsentiment=0)) -> dfclean
+
+head(dfclean)
+```
+
+```{r}
+#another way to summarise/split into positive and negative 
+afinnsent <- afinn %>%
+  group_by(listing_id) %>%
+  mutate(polarity_level=ifelse(value >0, "Positive","Negative")) %>%
+  count(polarity_level)
+    
+head(afinnsent)
+```
+
+Some of the scores are negative, neutral (including the outlier of -188) because of non-english characters (this needs work). Sentiment score on dfclean is the sum of all the values. 
+
+##Bing 
+
+2.)  Bing: The bing lexicon categorizes words in a binary fashion into positive and negative categories.
+
+```{r}
+#UNNEST_TOKENS & calculate bing lexicon sentiment
+review_comments %>%
+  inner_join(get_sentiments("bing")) -> bingreviews
+
+#count sentiments in separate columns and calculate net sentiment (positive - negative)
+bingsent <- bingreviews %>%
+  group_by(listing_id) %>% #grouped by listing_id 
+  count(neighbourhood, sentiment) %>%
+  spread(sentiment, n, fill=0) %>%
+  mutate(bingsentiment = positive - negative)
+
+head(bingsent)
+
+#subset just listing_id and sentiment score to join with dfclean
+bing <- subset(bingsent, select=c(listing_id, bingsentiment))
+
+#left join sentiments to review df & replace NAs with 0 
+dfclean %>% 
+  left_join(bing) %>%
+  replace_na(list(bingsentiment=0)) -> dfclean
+```
+
+```{r}
+#Comparison cloud of Bing sentiment using acast()
+library(reshape2)
+
+bingreviews %>%
+  count(word, sentiment, sort= TRUE) %>%
+  acast(word ~ sentiment, value.var="n", fill=0) %>%
+  comparison.cloud(colors=c("red","blue"),
+                   max.words = 100)
+```
+
+
+```{r}
+#Filter negative reviews using Bing
+bingnegative <- bingreviews %>%
+  filter(sentiment == "negative")
+
+head(bingnegative, n=20)
+```
+
+##NRC 
+
+```{r}
+#apply nrc sentiment to comments
+review_comments %>%
+  inner_join(get_sentiments("nrc") %>%
+             filter(sentiment %in% c("positive","negative"))) -> nrcreviews
+
+#group by listing ID and output sentiment score 
+nrcsent <- nrcreviews %>%
+  group_by(listing_id) %>%
+  count(neighbourhood, sentiment) %>%
+  spread(sentiment, n, fill=0) %>%
+  mutate(nrcsentiment = positive-negative)
+
+summary(nrcsent)
+head(nrcsent)
+
+#subset listing_id and nrc sentiment score 
+nrc <- subset(nrcsent, select = c(listing_id, nrcsentiment))
+
+#left join sentiments to review df & replace NAs with 0 
+dfclean %>% 
+  left_join(nrc) %>%
+  replace_na(list(nrcsentiment=0)) -> dfclean
+
+#View dfclean to confirm join 
+head(dfclean)
+```
+
+##Using SentimentR 
+- used to calculate text polarity sentiment at the sentence level (can aggregate by rows or grouping variables)
+
+WHY sentimentR? 
+- Because Sentiment Rtakes into account valence shifters (negators, amplifiers, deamplifiers, and adversative conjunctions). 
+
+Polarity score is calculated by a combined and augmented version of Jocker's (2017) & Rinker's augmented Hu & Liu's (2004) dictionaries in the lexicon package 
+
+###Calculate Sentiment R score by listing and join onto dfclean 
+
+library(sentimentr)
+
+#aggregate by listing id & calculate sentimentR score 
+review_comments %>% 
+  get_sentences() %>%
+  sentiment_by(by=c("listing_id")) -> sl
+
+#five number summary of sentiment scores 
+summary(sl$ave_sentiment)
+
+#view head of sl dataframe
+head(sl, n=10)
+
+#density plot of sentimentR score
+sl %>%
+  ggplot() + 
+  geom_density(aes(ave_sentiment))
+
+#view split of polarity level for SentimentR scores 
+sl %>%
+  mutate(polarity_level = ifelse(ave_sentiment > 0, "Positive","Negative")) %>%
+  count(polarity_level) 
+
+#check for NAs
+colSums(is.na(sl)|sl == '')
+
+
+Both the histogram and density plots show a spike in 0, which means there are some that did not have a sentimentR score at all. 
+
+
+#subset sentiment score with listing id
+sln <- subset(sl, select = c(listing_id, ave_sentiment))
+
+#left join sl to df & replace NAs with 0 
+dfclean %>% 
+  left_join(sln) %>%
+  replace_na(list(ave_sentiment=0)) -> dfclean
+
+
+
+#Sentiment Classification using ML models 
+
+In this code: 
+- Classifying sentiment dictionary scores into a "Positive" or "Negative" for each listing 
+- Resampling imbalanced dataset
+- Sentiment classification using three different ML models: Naive Bayes, Random Forest, Logistic Regression 
+
+```{r setup, include=FALSE}
+dfclass <- read.csv("/Users/Joanne/Documents/ChangSchool/Capstone/dfclean_sentiment.csv", stringsAsFactors = FALSE)
+
+head(dfclass)
+dfclass <- subset(dfclass, select=-c(X, price, minimum_nights))
+dfclass <- right_join(dfclass, subsetregion) #subset region from exploratory code
+
+names(dfclass)
+#write.csv(dfclass, "dfclassification.csv", row.names = FALSE)
+```
+
+
+The four lexicon dictionaries used in sentiment analysis is AFINN, BING, NRC and SentimentR sentence analysis. NRC, Bing and Afinn are calculated by words. SentimentR is calculated by sentences.
+
+```{r}
+summary(dfclass$afinnsentiment)
+summary(dfclass$bingsentiment)
+summary(dfclass$nrcsentiment)
+summary(dfclass$ave_sentiment)
+```
+
+Categorizing scores into positive and negative by inputting positive(1)/negative(0) for each dictionaries. 
+
+```{r}
+#Write function to change to positive(1) or negative(0)
+SentimentFun <- function(x){
+  ifelse(x>0, "1","0")
+}
+
+sent <- data.frame(dfclass, lapply(dfclass[13:16], SentimentFun))
+
+#convert dictionary factor columns to numeric
+sent$afinnsentiment.1 <- as.numeric(as.character(sent$afinnsentiment.1))
+sent$bingsentiment.1 <- as.numeric(as.character(sent$bingsentiment.1))
+sent$nrcsentiment.1 <- as.numeric(as.character(sent$nrcsentiment.1))
+sent$ave_sentiment.1 <- as.numeric(as.character(sent$ave_sentiment.1))
+
+str(sent)
+```
+
+```{r}
+head(sent)
+
+#Sum up lexicon scores 
+sent %>%
+  mutate(total_score = rowSums(.[18:21])) -> sent
+
+#function to return positive if the sum of lexicon scores of the four variables is greater than or equal to 2 (two dictionaries output as positive). 
+sent %>% 
+  rowwise() %>%
+  mutate(totalsent= ifelse(total_score >= 2, "Positive","Negative")) -> sent
+
+#class distribution of classification
+prop.table(table(sent$totalsent))
+names(sent)
+```
+
+```{r}
+#save dataframe with sentiment scores/classification and void unneeded attributes
+dfsent.final <- subset(sent, select=-c(host_id, neighbourhood, latitude, longitude, last_review, afinnsentiment, bingsentiment, nrcsentiment, ave_sentiment, afinnsentiment.1, bingsentiment.1, nrcsentiment.1, ave_sentiment.1, total_score))
+
+#write.csv(dfsent.final, "classificationdf.csv", row.names = FALSE)
+str(dfsent.final)
+```
+
+--------------------------------------------------
+
+#Sentiment Classification
+To build a model in order to classify a airbnb listing as positive or negative by their listing attributes such as neighbourhood, price, minimum nights, number of reviews, reviews per month, etc 
+
+Three models are being tested: 
+- Naive Bayes 
+- Random Forest 
+- Logistic Regression 
+
+```{r}
+library(caret)
+airbnb <- dfsent.final
+str(airbnb)
+#as factor for room_type and totalsent 
+airbnb$room_type <- as.factor(airbnb$room_type)
+airbnb$totalsent <- as.factor(airbnb$totalsent)
+```
+##Pre-processing 
+
+Standardize number of reviews, capped price and capped minimum nights 
+
+```{r}
+airbnb$number_of_reviews <- scale(airbnb$number_of_reviews)
+airbnb$calculated_host_listings_count <- scale(airbnb$calculated_host_listings_count)
+airbnb$capped_minimum_nights <- scale(airbnb$capped_minimum_nights)
+airbnb$capped_price <- scale(airbnb$capped_price)
+head(airbnb)
+```
+
+##Data visualization 
+```{r, echo=FALSE}
+#visual 1 - room type
+ggplot(airbnb, aes(room_type, fill=totalsent, color=totalsent)) + 
+  geom_histogram(stat="count") + labs(title="Room type by Sentiment") + 
+  theme_bw()
+
+#visual 2 - capped_ price 
+ggplot(airbnb, aes(capped_price, fill=totalsent, color=totalsent)) + 
+  geom_histogram(binwidth=1) + labs(title = "Price by Sentiment") + 
+  theme_bw() 
+
+#visual 3 - capped_minimum nights
+ggplot(airbnb, aes(capped_minimum_nights, fill=totalsent, color=totalsent)) + 
+  geom_histogram(binwidth=1) + labs(title = "Minimum Nights by Sentiment") + 
+  theme_bw() 
+
+#visual 4 - number of reviews 
+ggplot(airbnb, aes(number_of_reviews, fill=totalsent, color=totalsent)) + 
+  geom_histogram(binwidth=1) + labs(title = "# of reviews by Sentiment") + 
+  theme_bw()
+
+#visual 5 - reviews per month 
+ggplot(airbnb, aes(reviews_per_month, fill=totalsent, color=totalsent)) + 
+  geom_histogram(binwidth=1) + labs(title = "Reviews per month by Sentiment") + 
+  theme_bw() 
+
+#visual 6 - host listings count
+ggplot(airbnb, aes(calculated_host_listings_count, fill=totalsent, color=totalsent)) + 
+  geom_histogram(binwidth=1) + labs(title = "Host Listing count by Sentiment") + 
+  theme_bw() 
+```
+
+
+```{r}
+#install.packages("DataExplorer")
+library(DataExplorer)
+plot_correlation(airbnb)
+plot_histogram(airbnb)
+```
+
+```{r}
+#check for biases 
+prop.table(table(airbnb$totalsent))
+
+str(airbnb)
+
+```
+There is a huge class imbalance here: 
+4% negative and 96% positive 
+
+Need to tackle imbalance prior to modeling (using package ROSE)
+
+```{r}
+#Using package ROSE to tackle imbalance data set 
+#install.packages("ROSE")
+library(ROSE)
+library(e1071)
+library(caTools)
+
+#splitting data into training (70%) and test set (30%) prior to tackling class imbalance 
+split <- sort(sample(nrow(airbnb), nrow(airbnb)*.7))
+train <- airbnb[split,]
+test <- airbnb[-split,]
+
+#check class distribution in train set 
+prop.table(table(test$totalsent))
+table(test$totalsent)
+```
+
+##Resampling 
+Using ROSE's package, create train data with the application of 
+1. Oversample (increases size of minority class)
+2. Undersample (reduces size of majority class)
+3. Both over and undersample
+
+```{r}
+#oversampling - oversample minority class
+data_balanced_over <- ovun.sample(totalsent ~., data=train, method="over", seed=1)$data
+table(data_balanced_over$totalsent)
+
+#undersample - is done without replacement 
+data_balanced_under <- ovun.sample(totalsent ~., data=train, method="under", seed=1)$data
+table(data_balanced_under$totalsent)
+
+#both under and oversample
+data_balanced_both <- ovun.sample(totalsent ~., data=train, method="both", p=0.5, seed=1)$data
+table(data_balanced_both$totalsent)
+
+#relevel structure to Factor LVL 2 "Negative" "Positive" 
+data_balanced_over$totalsent <- relevel(data_balanced_over$totalsent, "Negative")
+data_balanced_under$totalsent <- relevel(data_balanced_under$totalsent, "Negative")
+data_balanced_both$totalsent <- relevel(data_balanced_both$totalsent, "Negative")
+```
+
+##Naive Bayes
+
+Assumptions: 
+- features being classified are independent of each other 
+
+Advantage: 
+- quick to implement 
+- requires little to no training 
+
+Disadvantage: 
+- assumption of independence is rare in a real world setting 
+
+
+```{r}
+#Build Naive Bayes models 
+classifier_nb <- naiveBayes(totalsent ~ ., data=train)
+naive.over <- naiveBayes(totalsent ~., data=data_balanced_over)
+naive.under <- naiveBayes(totalsent ~., data=data_balanced_under)
+naive.both <- naiveBayes(totalsent ~., data=data_balanced_both)
+
+#make predictions on unseen data
+nb_pred <- predict(classifier_nb, test)
+pred.naive.over <- predict(naive.over, newdata=test)
+pred.naive.under <- predict(naive.under, newdata=test)
+pred.naive.both <- predict(naive.both, newdata=test)
+```
+
+Evaluation of Naive Bayes: 
+
+1. Precision: measure of correctness achieved in positive prediction (TP/(TP+FP))
+
+2. Recall: measure of actual observations which are labeled (predicted) correctly (sensitivity TP/(TP+FN))
+
+3. F-measure: combines precision and recall as measure of effectivness of classification in terms of ratio of weighted importance on either recall or precision as determined by B coefficient. 
+
+The above 1,2,3, can be ineffective in answering important questions on classification. Precision does not tell us about negative prediction accuracy. Recall is more interested in knowing actual positives. 
+
+A better measurement for the accuracy of a classification prediction will be the ROC (Receiver Operating Characteristics). Formed by plotting TP rate (Sensitivity) and FP rate (Specificity). 
+
+```{r}
+#using accuracy.meas(ROSE package) for metrics 
+accuracy.meas(test$totalsent, nb_pred)
+accuracy.meas(test$totalsent, pred.naive.over)
+accuracy.meas(test$totalsent, pred.naive.under)
+accuracy.meas(test$totalsent, pred.naive.both)
+```
+
+A better measurement for the accuracy of a classification prediction will be the ROC curve (Receiver Operating Characteristics): graphical summary of the overall performance of the model. Formed by plotting TP rate (Sensitivity) and FP rate (Specificity). 
+
+Specificity: TN/ (TN + FP) - Actual negative but predicted positive 
+ROC graph: any points correspond to the performance of a single classifier on a given distribution. It provides a visual representation of benefits (TP) and costs (FP) of a classification data. The Larger the curve, the higher the accuracy. 
+
+
+```{r}
+#ROC curves 
+#AUC original train set 
+roc.curve(test$totalsent, nb_pred, plotit=F)
+
+#AUC Oversampling 
+roc.curve(test$totalsent, pred.naive.over)
+
+#AUC Undersampling 
+roc.curve(test$totalsent, pred.naive.under)
+
+#AUC both 
+roc.curve(test$totalsent, pred.naive.both)
+```
+When comparing Naive Bayes models with resampling techniques applied, the AUC variance between all techniques are small with the lowest at 0.852 to the highest of 0.855 (oversampling). 
+
+```{r}
+#confusion matrix 
+nb_cm <- table(test$totalsent, nb_pred)
+nb_over <- table(test$totalsent, pred.naive.over)
+nb_under <- table(test$totalsent, pred.naive.under)
+nb_both <- table(test$totalsent, pred.naive.both)
+
+confusionMatrix(nb_cm, positive = "Positive")
+confusionMatrix(nb_over, positive = "Positive")
+confusionMatrix(nb_under, positive = "Positive")
+confusionMatrix(nb_both, positive = "Positive")
+```
+
+```{r}
+#plot the confusion matrix
+library(ggplot2)
+ggplot(test, aes(totalsent, nb_pred, color=totalsent)) + 
+  geom_jitter(width=0.2, height=0.1, size=2) + 
+  labs(title="Confusion Matrix",
+       subtitle="predicted vs observed",
+       y="Predicted",
+       x="Actual")
+```
+
+All naive bayes models resulted in accuracy above 70% with the highest at 79% without resampling of data (which is prone to overfitting). Amongst the resampled techniques, Both over and undersampling resulted in 76% accuracy. 
+
+However, the kappa (accuracy corrected for chance) is very low (<20%) for all models. 
+
+Lastly,all had a sensitivity rate of over 99% and specificity rate of under 15%. This means the proportion of negative listings that were correctly identified as negative is very low. 
+
+
+
+##Random Forest 
+- builts multiple decision trees, and puts them together into a more accurate and stable prediction 
+- the higher the number of trees in the forest, the greater the accuracy of the results 
+- based on the idea of bagging (used to reduce the variation in the predictions by combining the result of multiple decision trees on different sample of the dataset)
+
+```{r}
+#Cross tables to view relations between two variables 
+table(train[,c('totalsent', 'room_type')])
+table(train[,c('totalsent', 'region')])
+```
+
+
+Build models with imbalanced class manipulation using ROSE package 
+
+```{r}
+#install.packages("randomForest")
+library(randomForest)
+
+#Build Random Forest models 
+classifier_rf = randomForest(totalsent ~., data=train, ntree=500)
+rf.over <- randomForest(totalsent ~., data=data_balanced_over, ntree=500)
+rf.under <- randomForest(totalsent ~., data=data_balanced_under, ntree=500)
+rf.both <- randomForest(totalsent ~., data=data_balanced_both, ntree=500)
+
+#make predictions on test set 
+rf_pred <- predict(classifier_rf, newdata=test)
+pred.rf.over <- predict(rf.over, newdata=test)
+pred.rf.under <- predict(rf.under, newdata=test)
+pred.rf.both <- predict(rf.both, newdata=test)
+
+#roc curve
+roc.curve(test$totalsent, rf_pred) #original
+roc.curve(test$totalsent, pred.rf.over) #oversampling
+roc.curve(test$totalsent, pred.rf.under) #undersampling
+roc.curve(test$totalsent, pred.rf.both) #both over/under 
+```
+
+The AUC between before and after resampling can be seen more drastically with Random Forest modeling. The AUC of the original data prior to resampling is merely 0.521, much lower than the others which were all over 0.85. 
+
+A combination of over and under resampling technique yielded the highest AUC of 0.926. 
+
+```{r}
+#confusion matrix
+predict_RF <- table(test$totalsent, rf_pred)
+confusionMatrix(predict_RF, positive = "Positive")
+
+#Under resampling 
+pred_under_cm <- table(test$totalsent, pred.rf.under)
+confusionMatrix(pred_under_cm, positive = "Positive")
+
+#Over resampling 
+pred_over_cm <- table(test$totalsent, pred.rf.over)
+confusionMatrix(pred_over_cm, positive = "Positive")
+
+#both over/under resampling 
+pred_both_cm <- table(test$totalsent, pred.rf.both)
+confusionMatrix(pred_both_cm, positive = "Positive")
+```
+
+Oversampling returned the highest accuracy rate of 0.97 and Kappa of 0.583. Both over/under sampling also returned a high accuracy rate of 0.95 and Kappa of 0.583. 
+
+Sensitivity, also known as Recall, is the True Positive Rate (the proportion of listings identified as positive correctly)
+
+Specificity, measures the true Negative Rate, the proportion of listings identified as negative correctly. For this project, our goal is to classify listings as positive or negative to help hosts' improve their listing. Thus, both sensitivity and specificity is important- perhaps with specificity even more important so that if a listing is identified as negative- hosts are aware and can provide change to improve their listing. 
+
+Similar to accuracy rate and kappa, oversampling and both under/over sampling returns the highest specificity rate. 
+
+
+##Logistic Regression 
+- defines probability of an observation belonging to a category or group. 
+
+Assumptions: 
+- dependent variable must be binary 
+- independent variables should be independent of each other 
+- no high intercorrelations (multicollinearity) among the predictors 
+
+
+Fit model with training sets 
+
+```{r}
+#fit logistic regression model with training dataset 
+log.model <- glm(totalsent ~., 
+                 data=train, 
+                 family=binomial(link="logit"))
+
+#log model with over sample 
+log.over <- glm(totalsent ~., 
+                data=data_balanced_over, 
+                family = binomial(link = "logit"))
+
+#log model with under stample
+log.under <- glm(totalsent ~., 
+                 data = data_balanced_under, 
+                 family = binomial(link = "logit"))
+
+#log model with balanced over/under sample 
+log.both <- glm(totalsent ~., 
+                data = data_balanced_both, 
+                family = binomial(link = "logit"))
+
+#summaries 
+summary(log.model)
+summary(log.over)
+summary(log.under)
+summary(log.both) 
+
+```
+
+```{r}
+#assess multicollinearity using vif from the car package 
+library(car)
+vif(log.under)
+vif(log.over)
+vif(log.both)
+#VIF that exceeds 5 or 10 indicates high level of collinearity 
+```
+
+There is no collinearity in these models, all variables have a value of VIF under 2. 
+
+```{r}
+#prediction for test data
+log.predictions <- predict(log.model, test, type="response")
+log.over.pred <- predict(log.over, test, type="response")
+log.under.pred <- predict(log.under, test, type="response")
+log.both.pred <- predict(log.both, test, type="response")
+
+#assign labels with decision rule that if prediction is greater than 0.5, assign 1 else 0
+log.prediction <- ifelse(log.predictions > 0.5, 'Positive', 'Negative')
+log.over.pred <- ifelse(log.over.pred > 0.5, 'Positive', 'Negative')
+log.under.pred <- ifelse(log.under.pred > 0.5, 'Positive', 'Negative')
+log.both.pred <- ifelse(log.both.pred >0.5, 'Positive', 'Negative')
+```
+
+Evaluation 
+- Accuracy
+- ROC curve
+- confusion matrix 
+
+```{r}
+ #roc curve
+roc.curve(test$totalsent, log.prediction)
+roc.curve(test$totalsent, log.over.pred)
+roc.curve(test$totalsent, log.under.pred)
+roc.curve(test$totalsent, log.both.pred)
+```
+
+```{r}
+u <- union(log.prediction, test$totalsent)
+uover <- union(log.over.pred, test$totalsent)
+uunder <- union(log.under.pred, test$totalsent)
+uboth <- union(log.both.pred, test$totalsent)
+
+#Confusion Matrix 
+log_output <- table(factor(test$totalsent, u), factor(log.prediction,u))
+log_over_output <- table(factor(test$totalsent,uover), factor(log.over.pred, uover))
+log_under_output <- table(factor(test$totalsent, uunder), factor(log.under.pred, uunder))
+log_both_output <- table(factor(test$totalsent, uboth), factor(log.both.pred, uboth))
+```
+
+```{r}
+confusionMatrix(log_output)
+confusionMatrix(log_over_output)
+confusionMatrix(log_under_output)
+confusionMatrix(log_both_output)
+```
+
+Again, resampling techniques yielded the highest AUC of over 0.80. The highest AUC is from over and under resampling of 0.886, however, using both over/under sample also yielded a high AUC of 0.883. 
+
+Accuracy of resampled data is lower for logistic regression, but in the original dataset, the specificity is 0 - meaning none of the listings that are labeled negative was correctly classified as negative. 
+
+Oversampling data logistic regression model yielded at 82% accuracy, kappa at 0.26, and highest specificity at 0.18 (which is still not high compared to other models). 
+
+#Evaluating Three Classification Models 
+
+After resampling technique of both over/under sampling.  
+```{r}
+#Naive Bayes
+roc.curve(test$totalsent, pred.naive.both)
+confusionMatrix(nb_both, positive = "Positive")
+
+#Random Forest 
+roc.curve(test$totalsent, pred.rf.both)
+confusionMatrix(pred_both_cm, positive = "Positive")
+
+#Logistic Regression 
+roc.curve(test$totalsent, log.both.pred)
+confusionMatrix(log_both_output, positive = "Positive")
+```
+Naive Bayes 
+- AUC 0.864
+- Accuracy: 75%
+- Kappa: 0.17
+- Sensitivity: 0.99
+- Specificity: 0.12 
+
+Random Forest 
+- AUC 0.926
+- Accuracy 0.95
+- Kappa 0.583
+- Sensitivity: 0.99 
+- Specificity: 0.45
+
+Logistic Regression 
+- AUC 0.883
+- Accuracy: 0.82
+- Kappa: 0.254
+- Sensitivity: 0.99 
+- Specificity: 0.18 
+
+The best sentiment classification model seems to be Random Forest with a AUC of 0.926. Also important is the highest specificity rate of 0.45, noting its ability to predict negative listings correctly. This is important as to not give hosts a false sense of their listing as positive, but many guests might deem it to be negative. 
+
+
+
+
+
