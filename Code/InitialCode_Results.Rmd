@@ -1,0 +1,1881 @@
+---
+title: "Initial Code and Results"
+output:
+  html_document: default
+  word_document: default
+---
+
+In this code: 
+- Exploratory data review 
+- Handling outliers and missing values
+- Reduce 140 neighbourhoods into 10 regions 
+- Create maps
+
+
+```{r libraries used, include=FALSE}
+
+library(ggmap)
+library(dplyr)
+library(ggplot2)
+library(mapview)
+library(textstem)
+library(stringr)
+library(Hmisc)
+library(ggpubr)
+library(NCmisc)
+library(tidyverse)
+library(tm)
+library(tidytext)
+library(textstem)
+library(tidyverse)
+library(stringr)
+library(wordcloud)
+library(tidyr)
+library(caret)
+library(ROSE)
+
+register_google(key="AIzaSyBAfwGIFqbBu3Vfjz_nMO3iqmzYQZglyP8")
+```
+
+
+#Read data files 
+```{r}
+mayreviews <- read.csv("/Users/Joanne/Documents/ChangSchool/Capstone/Airbnb/TOlistingfiles/Mayreviews.csv", na.strings="", stringsAsFactors = FALSE)
+maylistings <- read.csv("/Users/Joanne/Documents/ChangSchool/Capstone/Airbnb/TOlistingfiles/maylistings_short.csv", na.strings="")
+```
+
+```{r}
+str(maylistings)
+str(mayreviews)
+
+#rename list id to listing_id so both datasets key matches
+names(maylistings)[1] <- "listing_id"
+names(maylistings)
+```
+
+#Exploratory - listings dataset 
+```{r remove unwanted variables}
+#remove unneeded variables in maylistings - name, host_name, neighbourhood_group
+#void variables we dont need
+
+df <- subset(maylistings, select= -c(name, host_name, neighbourhood_group))
+
+#df has 13 variables 
+str(df)
+```
+
+How many missing values are there? 
+```{r check for missing values}
+#check for NAs
+colSums(is.na(df)|df == '')
+
+#4205 last review & reviews_per_month missing values under comments
+```
+
+Let's take a look at some descriptive information 
+
+```{r Descriptive summaries}
+#quick descriptive information
+with(df, summary(room_type))
+with(df, summary(price)) #max is $14058 - clear outlier
+with(df, summary(minimum_nights)) #max for minimum nights is 1125 - clear outlier
+with(df, summary(number_of_reviews))
+with(df, summary(reviews_per_month)) #4205 NA's 
+with(df, summary(calculated_host_listings_count))
+with(df, summary(availability_365)) 
+```
+
+##Room Type 
+
+```{r bar graph by room type}
+#LISTING GROUPED BY ROOM TYPE
+df %>% 
+  filter(!is.na(room_type)) %>% 
+  group_by(room_type) %>%
+  summarise(nr=length(room_type)) %>% 
+  mutate(percentage = (nr/sum(nr)*100)) %>%
+  ungroup() -> rt
+
+#view 
+rt
+
+#Create bar graph - library(ggplot2)
+ggplot(data= rt, aes(x = reorder(room_type, nr), y=nr/1000)) +
+  geom_bar(stat="identity", fill="orange", colour="black") + theme_bw(base_size=10) + geom_text(aes(label=nr), vjust=0, nudge_y = 0.5) + 
+  labs(title="Listings grouped by Room Type", x= "Room Type", y="Number of listings")
+```
+
+64% of listings are entire home/apt 
+33% of listings are private rooms 
+1.80% of listings are shared room 
+0.33% are hotel rooms 
+
+##Price 
+
+```{r}
+summary(df$price) #mean 144.6 
+```
+
+According to the descriptive summary above, variable price contains many outliers. 
+
+Handling outliers: 
+- Replaced outliers by capping at 0.5 quantile and 0.95 quantile 
+
+```{r Price capping outliers}
+#boxplot of price 
+outrt = boxplot.stats(df$price)$out #using IQR method to display data and outliers 
+head(which(df$price %in% outrt)) #which numbers are outliers 
+length(outrt) #total amount of outliers - 1625 (7% of total values) 
+
+#handling extreme values that lie outside the 1.5* IQR limits with capping (replacing observations that lie below limit with value of 5th percentile and those that lie above the upper limit with the value of 95th percentile) 
+replace_outliers <- function(x, removeNA=TRUE){ #function to capping outliers 
+  price <- x
+  qnt <- quantile(price, probs=c(.25, .75), na.rm= removeNA)
+  caps <- quantile(price, probs=c(.05, .95), na.rm = removeNA)
+  H <- 1.5 * IQR(price, na.rm = removeNA)
+  price[price < (qnt[1] - H)] <- caps[1]
+  price[price > (qnt[2] + H)] <- caps[2]
+  price
+}
+
+df$capped_price <- replace_outliers(df$price) #capp price on df
+
+#output comparison 
+boxplot(df$price, main="Price with outliers")
+boxplot(df$capped_price, main="price without outliers", boxwex=0.1)
+
+summary(df$capped_price) #max is $350 
+summary(df$price) #og summary with max $14058
+```
+
+
+```{r boxplots room type and price}
+#how mean price differs based on room type
+RTmeans = with(df, by(capped_price, room_type, mean))
+head(RTmeans)
+
+#how mean price differs based on neighbourhood 
+Nmeans = with(df, by(capped_price, neighbourhood, mean))
+head(Nmeans)
+
+library(ggpubr)
+ggboxplot(df, x="room_type", y="capped_price") #boxplot by room type and price 
+```
+
+
+##minimum nights 
+Explore minimum nights required by listing. 
+
+```{r}
+describe(df$minimum_nights)
+boxplot(df$minimum_nights)
+```
+
+Realistically, those listings above 30 days minimum nights will rarely obtain any requests for stays because it becomes a long term rental.
+
+```{r boxplox minimum nights}
+#boxplot of outliers of minimum nights 
+outmn = boxplot.stats(df$minimum_nights)$out #using IQR method to display data 
+head(which(df$minimum_nights %in% outmn)) #which numbers are outlier
+length(outmn) #total amount of outliers - 3104 (14%)
+
+#return outliers 2SD below and above the mean 
+library(NCmisc)
+length(which.outlier(df$minimum_nights, thr=2, method=c("sd"), high = TRUE, low=TRUE))
+```
+
+Handling outliers: 
+Impute outliers with 2 standard deviation above the mean. Upper bound will become 70 days. Minimum number of days of 1 is a must, thus, no outliers in the lower bound will be imputed.
+
+```{r cap minimum nights outliers}
+mean(df$minimum_nights) + (sd(df$minimum_nights)*2) #70
+length(which(df$minimum_nights >70)) #400 above upper bound
+
+#Function to replace outliers with the capping of 2 SD lower and upper bound 
+cap_outliers_mn <- function(x, removeNA=TRUE){ #function to capping outliers 
+  minimum_nights <- x
+  upper <- mean(minimum_nights) + (sd(minimum_nights)*2)
+  minimum_nights[minimum_nights > upper] <- upper[1]
+  minimum_nights
+}
+
+#capp outliers with 2sd upper bound
+capped_minnights <- cap_outliers_mn(df$minimum_nights)
+describe(capped_minnights)
+
+#add into df capped minimum nights column 
+df$capped_minnights <- as.integer(cap_outliers_mn(df$minimum_nights))
+```
+
+##number of reviews 
+Explore number of reviews per listing as of May 2020
+
+```{r boxplot room type and number of reviews}
+describe(df$number_of_reviews)
+boxplot(df$number_of_reviews)
+
+df %>% filter(!is.na(room_type)) %>% #group by room type & count number of reviews 
+  group_by(room_type) %>% 
+  summarise(nr=length(number_of_reviews)) %>%
+  ungroup() -> numr
+
+numr
+
+#boxplot by room type and number of reviews 
+ggboxplot(df, x="room_type", y="number_of_reviews")
+```
+It makes sense that the amount of reviews for entire home/apt is the most as most of the listings are that type of room listing. 
+
+##reviews per month 
+```{r boxplot reviews per month by room type}
+describe(df$reviews_per_month) #missing 4205 values 
+boxplot(df$reviews_per_month)
+
+#replace missing values with 0 
+df$reviews_per_month[is.na(df$reviews_per_month)] <- 0
+
+#boxplot by room type and reviews by month
+ggboxplot(df, x="room_type", y="reviews_per_month")
+```
+
+```{r}
+#subset listings that are > 12 reviews per month 
+df %>%
+  filter(reviews_per_month >= 12) -> topRPM
+head(topRPM)
+```
+
+
+##last review written date
+```{r}
+describe(df$last_review)
+#missing 4205 
+```
+
+There are 4205 missing values for this variable. In the may review dataset, when we calculate unique values of listing_id. There is 17566- which is the amount left when the missing values are subtracted from the full listing. 
+
+Reasons there might be missing value in this variable
+- new listings thus no one has stayed there yet 
+- have very limited stays but no reviews thus not relevant in this study 
+
+Since we cannot replace the dates with 0's, its best to delete these rows. 
+
+##Clean listings dataframe with imputed values and no missing values
+```{r Clean dataframe - dfclean}
+#remove row listings with last_review missing value 
+dfclean <- na.omit(df, cols="last_review")
+
+#remove original price and minimum nights 
+dfclean <- subset(dfclean, select=-c(price, minimum_nights))
+
+#change last_review to date structure
+dfclean$last_review <- as.Date(dfclean$last_review, format = "%Y-%m-%d")
+
+str(dfclean)
+```
+
+
+##neighbourhoods
+
+First we explore the original dataset with 140 neighbourhoods. 
+
+```{r Explore top neighbourhoods}
+#top 20 neighbourhoods 
+dfclean %>% group_by(neighbourhood) %>%
+  summarise(nr=length(neighbourhood)) %>% top_n(n=20) %>% 
+  arrange(-nr) %>% ungroup() -> ng
+
+#boxplot of top 20 neighbourhoods 
+ggplot(data=ng, aes(x=reorder(neighbourhood,nr), y=nr)) +
+  geom_bar(stat="identity", fill="grey", colour="black") + 
+  coord_flip() + theme_bw(base_size=10) + 
+  labs(title="Top 20 Toronto neighborhoods (by listings)", y="Number of Listings", x="Neighbourhood")
+
+#top 5 neighbourhoods 
+dfclean %>% group_by(neighbourhood) %>%
+  summarise(nr=length(neighbourhood)) %>% top_n(n=5) %>% 
+  arrange(-nr) %>% ungroup() -> tf
+
+#boxplot of top 5 neighbourhoods 
+ggplot(data=tf, aes(x=reorder(neighbourhood,nr), y=nr)) +
+  geom_bar(stat="identity", fill="grey", colour="black") + 
+  coord_flip() + theme_bw(base_size=10) + 
+  labs(title="Top 5 Toronto neighborhoods (by listings)", y="Number of Listings", x="Neighbourhood")
+```
+
+Subset Top 5 neighbourhoods with the most listings
+
+```{r top 5 neighbourhoods}
+#Top 5 neighborhoods by listing number 
+dfclean %>% group_by(neighbourhood) %>%
+  summarise(nr=length(neighbourhood)) %>% top_n(n=5) %>% 
+  arrange(-nr) %>% ungroup() -> top5
+top5 #output top 5 neighbourhood
+
+#create new dataframe with top 5 neighbourhood
+top5df <- subset(dfclean, neighbourhood == 'Waterfront Communities-The Island'|neighbourhood == 'Niagara'| neighbourhood =='Annex'| neighbourhood == 'Bay Street Corridor'| neighbourhood == 'Church-Yonge Corridor')
+
+str(top5df)
+```
+
+There are 140 neighbourhoods in Toronto, since many random forest does not allow for categories more than a certain number, and for ease of understanding, we will subset neighbourhoods into 10 regions. (torontoneighbourhoods.net & toronto.ca) 
+
+Etobicoke 1-20
+North York 21-53
+East York 54-61
+East End  62-70
+Downtown 71-84
+West End 85-93
+Midtown 94-98, 101-102
+Uptown 99, 100, 103,104,105
+York-Crosstown 106-115
+Scarborough 116-140
+
+```{r condense neighbourhoods to regions}
+length(levels(dfclean$neighbourhood))
+
+library(tidyverse)
+#condense 140 neighbourhoods to 10 
+dfclean$region <- fct_collapse(dfclean$neighbourhood, 
+                               'Etobicoke' = c("West Humber-Clairville",
+                                               "Mount Olive-Silverstone-Jamestown",
+                                               "Thistletown-Beaumond Heights",
+                                               "Rexdale-Kipling",
+                                               "Elms-Old Rexdale",
+                                               "Kingsview Village-The Westway",
+                                               "Willowridge-Martingrove-Richview",
+                                               "Humber Heights-Westmount",
+                                               "Edenbridge-Humber Valley",
+                                               "Princess-Rosethorn",
+                                               "Eringate-Centennial-West Deane",
+                                               "Markland Wood",
+                                               "Etobicoke West Mall",
+                                               "Islington-City Centre West",
+                                               "Kingsway South",
+                                               "Stonegate-Queensway",
+                                               "Mimico (includes Humber Bay Shores)",
+                                               "New Toronto",
+                                               "Long Branch",
+                                               "Alderwood"),
+                               'North York' = c("Humber Summit",
+                                                "Humbermede",
+                                                "Pelmo Park-Humberlea",
+                                                "Black Creek",
+                                                "Glenfield-Jane Heights",
+                                                "Downsview-Roding-CFB",
+                                                "York University Heights",
+                                                "Rustic",
+                                                "Maple Leaf",
+                                                "Brookhaven-Amesbury",
+                                                "Yorkdale-Glen Park",
+                                                "Englemount-Lawrence",
+                                                "Clanton Park",
+                                                "Bathurst Manor",
+                                                "Westminster-Branson",
+                                                "Newtonbrook West",
+                                                "Willowdale West",
+                                                "Lansing-Westgate",
+                                                "Bedford Park-Nortown",
+                                                "St.Andrew-Windfields",
+                                                "Bridle Path-Sunnybrook-York Mills",
+                                                "Banbury-Don Mills",
+                                                "Victoria Village",
+                                                "Flemingdon Park",
+                                                "Parkwoods-Donalda",
+                                                "Pleasant View",
+                                                "Don Valley Village",
+                                                "Hillcrest Village",
+                                                "Bayview Woods-Steeles",
+                                                "Newtonbrook East",
+                                                "Willowdale East",
+                                                "Bayview Village",
+                                                "Henry Farm"),
+                               'East York' = c("O'Connor-Parkview",
+                                               "Thorncliffe Park",
+                                               "Leaside-Bennington",
+                                               "Broadview North",
+                                               "Old East York",
+                                               "Danforth East York",
+                                               "Woodbine-Lumsden",
+                                               "Taylor-Massey"),
+                               'East End' = c("East End-Danforth",
+                                              "The Beaches",
+                                              "Woodbine Corridor",
+                                              "Greenwood-Coxwell",
+                                              "Danforth",
+                                              "Playter Estates-Danforth",
+                                              "North Riverdale",
+                                              "Blake-Jones",
+                                              "South Riverdale"),
+                               'Downtown' = c("Cabbagetown-South St.James Town",
+                                              "Regent Park",
+                                              "Moss Park",
+                                              "North St.James Town",
+                                              "Church-Yonge Corridor",
+                                              "Bay Street Corridor",
+                                              "Waterfront Communities-The Island",
+                                              "Kensington-Chinatown",
+                                              "University",
+                                              "Palmerston-Little Italy",
+                                              "Trinity-Bellwoods",
+                                              "Niagara",
+                                              "Dufferin Grove",
+                                              "Little Portugal"),
+                               'West End' = c("South Parkdale",
+                                              "Roncesvalles",
+                                              "High Park-Swansea",
+                                              "High Park North",
+                                              "Runnymede-Bloor West Village",
+                                              "Junction Area",
+                                              "Weston-Pellam Park",
+                                              "Corso Italia-Davenport",
+                                              "Dovercourt-Wallace Emerson-Junction"),
+                               'Midtown' = c("Wychwood",
+                                             "Annex",
+                                             "Casa Loma",
+                                             "Yonge-St.Clair",
+                                             "Rosedale-Moore Park",
+                                             "Forest Hill South",
+                                             "Forest Hill North"),
+                               'Uptown' = c("Mount Pleasant East",
+                                            "Yonge-Eglinton",
+                                            "Lawrence Park South",
+                                            "Mount Pleasant West",
+                                            "Lawrence Park North"),
+                               'York-Crosstown' = c("Humewood-Cedarvale",
+                                                    "Oakwood Village",
+                                                    "Briar Hill-Belgravia",
+                                                    "Caledonia-Fairbank",
+                                                    "Keelesdale-Eglinton West",
+                                                    "Rockcliffe-Smythe",
+                                                    "Beechborough-Greenbrook",
+                                                    "Weston",
+                                                    "Lambton Baby Point",
+                                                    "Mount Dennis"), 
+                               'Scarborough' = c("Steeles",
+                                                 "L'Amoreaux",
+                                                 "Tam O'Shanter-Sullivan",
+                                                 "Wexford/Maryvale",
+                                                 "Clairlea-Birchmount",
+                                                 "Oakridge",
+                                                 "Birchcliffe-Cliffside",
+                                                 "Cliffcrest",
+                                                 "Kennedy Park",
+                                                 "Ionview",
+                                                 "Dorset Park",
+                                                 "Bendale",
+                                                 "Agincourt South-Malvern West",
+                                                 "Agincourt North",
+                                                 "Milliken",
+                                                 "Rouge",
+                                                 "Malvern",
+                                                 "Centennial Scarborough",
+                                                 "Highland Creek",
+                                                 "Morningside",
+                                                 "West Hill",
+                                                 "Woburn",
+                                                 "Eglinton East",
+                                                 "Scarborough Village",
+                                                 "Guildwood")
+)
+
+levels(dfclean$region)
+```
+
+```{r visualizations by region}
+#Explore plots with regions
+dfclean %>% group_by(region) %>%
+  summarise(nr=length(region)) %>% 
+  arrange(-nr) %>% ungroup() -> r
+
+#boxplot of top listings by region 
+ggplot(data=r, aes(x=reorder(region,nr), y=nr)) +
+  geom_bar(stat="identity", fill="grey", colour="black") + 
+  coord_flip() + theme_bw(base_size=10) + 
+  labs(title="Top listings by region", y="Number of Listings", x="Neighbourhood")
+
+
+```
+
+##Toronto MAP 
+packages: get_map and ggmap 
+
+```{r, maps, echo=FALSE}
+#fetch map with location name
+library(ggmap)
+
+#registered google API and activated using register_google() 
+#enabled geocoding API on google cloud 
+#m <- get_map("Toronto",zoom=12, source="google") #get map of toronto
+#ggmap(m)
+
+#Fetch boundary specific map
+bbox <- make_bbox(dfclean$longitude, dfclean$latitude, f=0.05)
+b <- get_map(bbox, maptype = "toner-lite", source="stamen")
+ggmap(b)
+
+#Total TO listings by region 
+ggmap(b) + geom_point(data=dfclean, aes(longitude, latitude, color=region), size=0.01, alpha = 0.7) + labs(x = "Longtitude", y= "Latitude", title="Airbnb Toronto Listing Locations (by region)")
+
+#By region
+bboxfive <- make_bbox(top5df$longitude, top5df$latitude, f=0.05) #boundary specific
+bb <- get_map(bboxfive, maptype = "toner-lite", source="stamen")
+
+ggmap(bb) + geom_point(data=top5df, aes(longitude, latitude, color=neighbourhood), size=0.01, alpha = 0.7) + labs(x = "Longtitude", y= "Latitude", title="Airbnb Toronto Top 5 Listing Locations")
+```
+
+```{r}
+str(dfclean)
+
+subsetregion <- subset(dfclean, select=c(listing_id, region))
+
+#write.csv(dfclean, "dfclean.csv", row.names = FALSE)
+```
+
+Create dataframe with original attributes to run model 
+```{r dataframe with OG attributes}
+og_airbnb <- subset(maylistings, select=-c(name, host_id, latitude, longitude, host_name, neighbourhood_group, neighbourhood, last_review))
+names(og_airbnb)[1] <- 'listing_id'
+#add region 
+og_airbnb <- right_join(og_airbnb, subsetregion)
+str(og_airbnb)
+```
+
+#Exploratory - review dataset 
+
+```{r Change structure of review dataset}
+str(mayreviews)
+
+#convert date to an R date class 
+mayreviews$date <- as.Date(mayreviews$date, format = "%Y-%m-%d")
+
+#view R class of data 
+class(mayreviews$date)
+
+#view results 
+head(mayreviews$date)
+
+#new variable- extract YEAR (and convert to numeric format)
+mayreviews$year <- as.numeric(format(mayreviews$date,'%Y'))
+
+#new variable-extract MONTH (and convert to numeric format)
+mayreviews$month <- as.numeric(format(mayreviews$date,'%m'))
+```
+
+Group review by year written 
+```{r visualizations of number of reviews by year}
+mayreviews %>% filter(!is.na(year)) %>% group_by(year) %>%
+  summarise(nr=length(year)) %>% arrange(-year) %>% ungroup() -> yr
+
+yr
+
+ggplot(data=yr, aes(x=year, y=nr)) +
+  geom_line(stat="identity", colour="black", linetype=5, show.legend = TRUE) + 
+  geom_point() + 
+  geom_text(aes(label=nr), size=3, vjust=-0.5, nudge_y=0.5, colour='red') + 
+  theme_bw(base_size=10) + 
+  labs(title="Number of reviews (by Year)", y="Number of Listings") +
+  scale_x_discrete(name = "Year", 
+                   limits = c(seq(2009,2020,by=1)))
+```
+
+
+Break down monthly reviews written in 2019 
+```{r, monthly reviews break down, echo=FALSE}
+mayreviews %>% filter(!is.na(year == '2019')) %>% group_by(month) %>%
+  summarise(nr=length(month)) %>% ungroup() -> mth
+
+mth
+
+#create geom_line of monthly reviews written in 2019 
+ggplot(data=mth, aes(x=month, y=nr)) + 
+  geom_line(stat="identity", colour="black", linetype=5) + 
+  geom_point() + 
+  geom_text(aes(label=nr), vjust=-0.5, nudge_y=0.5, colour='red', size=3) + 
+  theme_bw(base_size=10) + 
+  labs(title="Number of reviews (by month in 2019) ", y="Number of Listings") + 
+  scale_x_discrete(name = "Months", 
+                   limits = c("1"="Jan", 
+                              "2"="Feb", 
+                              "3"= "Mar", 
+                              "4"="April", 
+                              "5"= "May", 
+                              "6"="June", 
+                              "7"= "july",
+                              "8" = "Aug",
+                              "9" = "Sept",
+                              "10" = "Oct",
+                              "11" = "Nov",
+                              "12" = "Dec"
+                              ))
+
+
+#http://www.cookbook-r.com/Graphs/Axes_(ggplot2)/
+#ensure x axis has every month for the label
+```
+
+##Time Series 
+
+```{r, time series graph, echo=FALSE}
+#Grouping number of reviews by year and month 
+m <- group_by(mayreviews, year, month)
+monthly <- summarise(m, number_reviews=n())
+
+
+ggplot(data=monthly, aes(x=month, y=number_reviews)) + 
+  geom_bar(stat="identity", fill ="darkorchid4") + 
+  facet_wrap( ~ year, ncol = 4) + 
+  labs(title = "Number of Reviews posted in Toronto", 
+       subtitle="By year", 
+       y="Number of reviews", 
+       x="Month") + 
+  theme_bw(base_size = 10) +
+  scale_x_discrete()
+```
+
+Join dfclean with clean reviews dataset 
+```{r}
+reviewsclean <- mayreviews
+head(reviewsclean)
+```
+
+#Sentiment Classification using ML models 
+
+In this code: 
+- Classifying sentiment dictionary scores into a "Positive" or "Negative" for each listing 
+- Resampling imbalanced dataset
+- Sentiment classification using three different ML models: Naive Bayes, Random Forest, Logistic Regression 
+
+```{r Upload csv of sentiment score}
+#this csv file is from sentiment only rmarkdown file 
+dfclean_sentiment <- read.csv("/Users/Joanne/Documents/ChangSchool/Capstone/dfclean_sentiment.csv", stringsAsFactors = FALSE)
+
+#subset sentiment only 
+sentiment <- subset(dfclean_sentiment, select=c(listing_id, 
+                                                afinnsentiment, 
+                                                bingsentiment, 
+                                                nrcsentiment, 
+                                                ave_sentiment))
+
+head(sentiment)
+```
+
+```{r Join sentiment score with dfclean}
+#Join sentiment only with 'dfclean' = modified attributes 
+dfclass <- right_join(dfclean, sentiment)
+str(dfclass)
+
+#remove original attributes & unneeded attributes 
+dfclass <- subset(dfclass, select=-c(host_id, last_review))
+names(dfclass)
+#write.csv(dfclass, "dfclassification.csv", row.names = FALSE)
+```
+
+The four lexicon dictionaries used in sentiment analysis is AFINN, BING, NRC and SentimentR sentence analysis. NRC, Bing and Afinn are calculated by words. SentimentR is calculated by sentences.
+
+```{r}
+summary(dfclass$afinnsentiment)
+summary(dfclass$bingsentiment)
+summary(dfclass$nrcsentiment)
+summary(dfclass$ave_sentiment)
+```
+
+Categorizing scores into positive and negative by inputting positive(1)/negative(0) for each dictionaries. 
+
+```{r Categorize sentiment polarity per dictionary}
+#Write function to change to positive(1) or negative(0)
+SentimentFun <- function(x){
+  ifelse(x>0, "1","0")
+}
+
+#sentiment dataframe 
+sent <- data.frame(dfclass, lapply(dfclass[13:16], SentimentFun))
+
+#convert dictionary factor columns to numeric
+sent$afinnsentiment.1 <- as.numeric(as.character(sent$afinnsentiment.1))
+sent$bingsentiment.1 <- as.numeric(as.character(sent$bingsentiment.1))
+sent$nrcsentiment.1 <- as.numeric(as.character(sent$nrcsentiment.1))
+sent$ave_sentiment.1 <- as.numeric(as.character(sent$ave_sentiment.1))
+
+str(sent)
+```
+
+```{r Categorize sentiment polarity per listing}
+head(sent)
+
+#Sum up lexicon scores 
+sent %>%
+  mutate(total_score = rowSums(.[17:20])) -> sent
+
+#function to return positive if the sum of lexicon scores of the four variables is greater than or equal to 2 (two dictionaries output as positive). 
+sent %>% 
+  rowwise() %>%
+  mutate(totalsent= ifelse(total_score >= 2, "Positive","Negative")) -> sent
+
+#class distribution of classification
+prop.table(table(sent$totalsent))
+
+#subset listing_id and sentiment score for all listings 
+sentimentonly <- subset(sent, select=c(listing_id, totalsent))
+head(sentimentonly)
+```
+
+```{r Updated sentiment polarity}
+str(sent)
+
+#save new model used for classification with sentiment scores/classification and void unneeded attributes
+dfsent.final <- subset(sent, select=-c(neighbourhood, latitude, longitude, afinnsentiment, bingsentiment, nrcsentiment, ave_sentiment, afinnsentiment.1, bingsentiment.1, nrcsentiment.1, ave_sentiment.1, total_score))
+
+#write.csv(dfsent.final, "classificationdf.csv", row.names = FALSE)
+str(dfsent.final)
+
+#right join sentiment score with original attribute model 
+og_airbnbmodel <- right_join(og_airbnb, sentimentonly)
+str(og_airbnbmodel)
+```
+
+--------------------------------------------------
+
+#Sentiment Classification
+
+To build a model in order to classify a airbnb listing as positive or negative by their listing attributes such as neighbourhood, price, minimum nights, number of reviews, reviews per month, etc 
+
+Three models are being tested: 
+- Naive Bayes 
+- Random Forest 
+- Logistic Regression 
+
+datasets used to build models 
+- 'dfsent.final' is the dataframe with modified attributes 
+- 'og_airbnbmodel' is the dataframe with original attributes 
+
+```{r}
+library(caret)
+airbnb <- dfsent.final
+#as factor for room_type and totalsent 
+airbnb$room_type <- as.factor(airbnb$room_type)
+airbnb$totalsent <- as.factor(airbnb$totalsent)
+airbnb$region <- as.factor(airbnb$region)
+airbnb <- as.data.frame(airbnb)
+str(airbnb)
+```
+##Pre-processing 
+
+Standardize attributes: number of reviews, reviews_per_month, calculated_host_listings_count, availability_365, capped_price and capped_minnights
+
+```{r Standardize attributes }
+airbnb$number_of_reviews <- scale(airbnb$number_of_reviews)
+airbnb$reviews_per_month <- scale(airbnb$reviews_per_month)
+airbnb$calculated_host_listings_count <- scale(airbnb$calculated_host_listings_count)
+airbnb$availability_365 <- scale(airbnb$availability_365)
+airbnb$capped_price <- scale(airbnb$capped_price)
+airbnb$capped_minnights <- scale(airbnb$capped_minnights)
+head(airbnb)
+```
+
+##Data visualization 
+```{r, visualizations of attributes, echo=FALSE}
+#visual 1 - room type
+ggplot(airbnb, aes(room_type, fill=totalsent, color=totalsent)) + 
+  geom_histogram(stat="count") + labs(title="Room type by Sentiment") + 
+  theme_bw()
+
+#visual 2 - capped_ price 
+ggplot(airbnb, aes(capped_price, fill=totalsent, color=totalsent)) + 
+  geom_histogram(binwidth=1) + labs(title = "Price by Sentiment") + 
+  theme_bw() 
+
+#visual 3 - capped_minimum nights
+ggplot(airbnb, aes(capped_minnights, fill=totalsent, color=totalsent)) + 
+  geom_histogram(binwidth=1) + labs(title = "Minimum Nights by Sentiment") + 
+  theme_bw() 
+
+#visual 4 - number of reviews 
+ggplot(airbnb, aes(number_of_reviews, fill=totalsent, color=totalsent)) + 
+  geom_histogram(binwidth=1) + labs(title = "# of reviews by Sentiment") + 
+  theme_bw()
+
+#visual 5 - reviews per month 
+ggplot(airbnb, aes(reviews_per_month, fill=totalsent, color=totalsent)) + 
+  geom_histogram(binwidth=1) + labs(title = "Reviews per month by Sentiment") + 
+  theme_bw() 
+
+#visual 6 - host listings count
+ggplot(airbnb, aes(calculated_host_listings_count, fill=totalsent, color=totalsent)) + 
+  geom_histogram(binwidth=1) + labs(title = "Host Listing count by Sentiment") + 
+  theme_bw() 
+```
+
+
+```{r correlation plots}
+#install.packages("DataExplorer")
+library(DataExplorer)
+airbnb.corr <- plot_correlation(airbnb)
+airbnb.hist <- plot_histogram(airbnb)
+
+airbnb.corr
+airbnb.hist
+```
+
+
+```{r}
+#check for biases 
+prop.table(table(airbnb$totalsent))
+```
+There is a huge class imbalance here: 
+4% negative and 96% positive 
+
+#Modeling with 70/30 training/test set split 
+
+Need to tackle imbalance prior to modeling (using package ROSE)
+
+```{r percentage split}
+#Using package ROSE to tackle imbalance data set 
+#install.packages("ROSE")
+library(ROSE)
+library(e1071)
+library(caTools)
+
+#splitting data into training (70%) and test set (30%) prior to tackling class imbalance 
+set.seed(123)
+split <- sort(sample(nrow(airbnb), nrow(airbnb)*.7))
+train <- airbnb[split,]
+test <- airbnb[-split,]
+
+#check class distribution in train set 
+prop.table(table(test$totalsent))
+table(test$totalsent)
+```
+
+##Resampling 
+Using ROSE's package, create train data with the application of 
+1. Oversample (increases size of minority class)
+2. Undersample (reduces size of majority class)
+3. Both over and undersample
+
+```{r ROSE}
+#oversampling - oversample minority class
+data_balanced_over <- ovun.sample(totalsent ~., 
+                                  data=train, method="over", seed=1)$data
+prop.table(table(data_balanced_over$totalsent))
+
+#both under and over sample 
+data_balanced_both <- ovun.sample(totalsent ~., 
+                                  data=train, method="both", p=0.5, seed=1)$data
+table(data_balanced_both$totalsent)
+
+#relevel structure to Factor LVL 2 "Negative" "Positive" 
+data_balanced_over$totalsent <- relevel(data_balanced_over$totalsent, "Negative") #over
+data_balanced_both$totalsent <- relevel(data_balanced_both$totalsent, "Negative") #both
+```
+
+##Naive Bayes
+
+Assumptions: 
+- features being classified are independent of each other 
+
+Advantage: 
+- quick to implement 
+- requires little to no training 
+
+Disadvantage: 
+- assumption of independence is rare in a real world setting 
+
+
+```{r Naive bayes with percentage split}
+#without oversampling - Build Naive Bayes models 
+classifier_nb <- naiveBayes(totalsent ~ ., data=train)
+nb_pred <- predict(classifier_nb, test) #make prediction 
+
+#oversampled data
+naive.over <- naiveBayes(totalsent ~., data=data_balanced_over)
+pred.naive.over <- predict(naive.over, newdata=test)
+
+#both under/oversampled data
+naive.both <- naiveBayes(totalsent ~., data=data_balanced_both)
+pred.naive.both <- predict(naive.both, newdata=test)
+```
+
+Evaluation of Naive Bayes: 
+
+1. Precision: measure of correctness achieved in positive prediction (TP/(TP+FP))
+
+2. Recall: measure of actual observations which are labeled (predicted) correctly (sensitivity TP/(TP+FN))
+
+3. F-measure: combines precision and recall as measure of effectivness of classification in terms of ratio of weighted importance on either recall or precision as determined by B coefficient. 
+
+The above 1,2,3, can be ineffective in answering important questions on classification. However, Precision does not tell us about negative prediction accuracy. Recall is more interested in knowing actual positives. 
+
+A better measurement for the accuracy of a classification prediction will be the ROC curve (Receiver Operating Characteristics): graphical summary of the overall performance of the model. Formed by plotting TP rate (Sensitivity) and FP rate (Specificity). 
+
+1. Sensitivity: (recall) measure of observations labeled (predicted) correctly.
+
+2. Specificity: TN/ (TN + FP) - Actual negative but predicted positive 
+
+3. AUC - ROC graph: any points correspond to the performance of a single classifier on a given distribution. It provides a visual representation of benefits (TP) and costs (FP) of a classification data. The Larger the curve, the higher the accuracy. 
+
+
+```{r naive bayes eval percentage split}
+#ROC curves 
+#AUC original train set 
+roc.curve(test$totalsent, nb_pred, plotit=F)
+
+#AUC Oversampling 
+nbroc.over <- roc.curve(test$totalsent, pred.naive.over)
+
+#AUC both over/under sample
+nbroc.both <- roc.curve(test$totalsent, pred.naive.both)
+
+#confusion matrix 
+nb_cm <- table(test$totalsent, nb_pred)
+nb_over <- table(test$totalsent, pred.naive.over)
+nb_both <- table(test$totalsent, pred.naive.both)
+
+nbresult.over <- confusionMatrix(nb_over, positive = "Positive")
+nbresult.both <- confusionMatrix(nb_both, positive = "Positive")
+```
+When comparing Naive Bayes models with resampling techniques applied, the AUC variance between all original and oversampled model is minimal with a higher AUC of 0.855 for the original model. The original model also has a higher accuracy percentage at 78% compared to 73%. Both has a high sensitivity score of 0.99 and low specificity score of > 0.20. 
+
+The high accuracy and AUC than oversampled data shows a possibility of overfitting. In addition, with a low specificity score, the proportion of negative listings that were correctly identified as negative is very low. 
+
+
+##Random Forest 
+- builts multiple decision trees, and puts them together into a more accurate and stable prediction 
+- the higher the number of trees in the forest, the greater the accuracy of the results 
+- based on the idea of bagging (used to reduce the variation in the predictions by combining the result of multiple decision trees on different sample of the dataset)
+
+```{r RF}
+#Cross tables to view relations between two variables 
+table(train[,c('totalsent', 'room_type')])
+table(train[,c('totalsent', 'region')])
+```
+
+
+```{r RF percentage split test and eval}
+#install.packages("randomForest")
+library(randomForest)
+
+#Build Random Forest models 
+classifier_rf = randomForest(totalsent ~., data=train, ntree=500) #original
+rf.over <- randomForest(totalsent ~., data=data_balanced_over, ntree=500) #oversample
+rf.both <- randomForest(totalsent ~., data=data_balanced_both, ntree=500) #both under/over
+
+#make predictions on test set 
+rf_pred <- predict(classifier_rf, newdata=test) #original
+pred.rf.over <- predict(rf.over, newdata=test) #oversample
+pred.rf.both <- predict(rf.both, newdata=test) #both under/over
+
+#roc curve
+roc.curve(test$totalsent, rf_pred) #original
+rfroc.over <- roc.curve(test$totalsent, pred.rf.over) #oversampling
+rfroc.both <- roc.curve(test$totalsent, pred.rf.both) #both over/under
+
+#confusion matrix
+predict_RF <- table(test$totalsent, rf_pred) #original 
+confusionMatrix(predict_RF, positive = "Positive")
+
+#oversample
+pred_over_cm <- table(test$totalsent, pred.rf.over) #oversample
+rfresult.over <- confusionMatrix(pred_over_cm, positive = "Positive")
+
+#both under/over
+pred_both_cm <- table(test$totalsent, pred.rf.both)
+rfresult.both <- confusionMatrix(pred_both_cm, positive = "Positive")
+```
+
+The AUC for original data and oversampled data are both low at > 0.60 (oversampled model slightly higher at 0.598).  Accuracy for both are over high at 0.94 - 0.96. This is a sign of overfitting, especially with a high sensitivity rate at ~0.96. The specificity rate is slightly higher than Naive Bayes model. 
+
+Specificity, measures the true Negative Rate, the proportion of listings identified as negative correctly. For this project, our goal is to classify listings as positive or negative to help hosts' improve their listing. Thus, both sensitivity and specificity is important- perhaps with specificity even more important so that if a listing is identified as negative- hosts are aware and can provide change to improve their listing. 
+
+
+##Logistic Regression 
+- defines probability of an observation belonging to a category or group. 
+
+Assumptions: 
+- dependent variable must be binary 
+- independent variables should be independent of each other 
+- no high intercorrelations (multicollinearity) among the predictors 
+
+
+```{r Logistic Regression modeling percentage split, message=FALSE, warning=FALSE}
+#fit logistic regression model with training dataset 
+log.model <- glm(totalsent ~., 
+                 data=train, 
+                 family=binomial(link="logit"))
+
+#log model with over sample 
+log.over <- glm(totalsent ~., 
+                data=data_balanced_over, 
+                family = binomial(link = "logit"))
+
+#log model with fewer predictors 
+log.over.2 <- glm(totalsent ~ room_type + region,
+                  data = data_balanced_over, 
+                  family = binomial(link="logit"))
+
+#log model with both under/over sample 
+log.both <- glm(totalsent ~., 
+                data = data_balanced_both, 
+                family = binomial(link = "logit"))
+
+#summaries 
+summary(log.model)
+summary(log.over)
+summary(log.both)
+```
+
+```{r}
+#assess multicollinearity using vif from the car package 
+library(car)
+vif(log.over)
+vif(log.both)
+#VIF that exceeds 5 or 10 indicates high level of collinearity, 
+#no collinearity 
+```
+
+
+```{r LR Modified Features Percentage Split, message=FALSE, warning=FALSE}
+#prediction for test data
+log.predictions <- predict(log.model, test, type="response")
+log.over.pred <- predict(log.over, test, type="response")
+log.both.pred <- predict(log.both, test, type = "response")
+
+#assign labels with decision rule that if prediction is greater than 0.5, assign 1 else 0
+log.prediction <- ifelse(log.predictions > 0.5, 'Positive', 'Negative')
+log.over.pred <- ifelse(log.over.pred > 0.5, 'Positive', 'Negative')
+log.both.pred <- ifelse(log.both.pred > 0.5, 'Positive', 'Negative')
+
+ #roc curve
+roc.curve(test$totalsent, log.prediction) #0.500 
+lrroc.over <- roc.curve(test$totalsent, log.over.pred) #0.875
+lrroc.both <- roc.curve(test$totalsent, log.both.pred) #0.873
+```
+
+```{r, message=FALSE, warning=FALSE}
+#create union
+u <- union(log.prediction, test$totalsent)
+uover <- union(log.over.pred, test$totalsent)
+uboth <- union(log.both.pred, test$totalsent)
+
+#Confusion Matrix 
+log_output <- table(factor(test$totalsent, u), factor(log.prediction,u))
+log_over_output <- table(factor(test$totalsent,uover), factor(log.over.pred, uover))
+log_both_output <- table(factor(test$totalsent, uboth), factor(log.both.pred, uboth))
+
+#LR results 
+confusionMatrix(log_output)
+lrresult.over <- confusionMatrix(log_over_output)
+lrresult.both <- confusionMatrix(log_both_output)
+```
+Logistic Regression Model with oversampling yielded at 81% accuracy, 0.99 sensitivity and 0.17 specificity- very few listings that are labeled negative was correctly classified as negative. 
+
+```{r}
+#variable importance 
+varImp(log.both)
+
+#likelihood ratio test 
+anova(log.over, log.over.2, test="Chisq")
+#reject null hypothesis that the reduced model is true 
+```
+
+
+
+##Evaluating Three Classification Models using 70/30 train/test set split 
+
+```{r Eval all classification models using percentage split}
+#Naive Bayes
+nbroc.over #auc
+nbresult.over
+
+nbroc.both #auc
+nbresult.both
+
+#Random Forest 
+rfroc.over #auc
+rfresult.over
+
+rfroc.both #auc
+rfresult.both
+
+#Logistic Regression 
+lrroc.over #auc
+lrresult.over
+
+lrroc.both #auc 
+lrresult.both
+```
+
+```{r}
+#roc curves 
+```
+
+
+Also important is the highest specificity rate of 0.30 for Random Forest Model, noting its ability to predict negative listings correctly. This is important as to not give hosts a false sense of their listing as positive, but many guests might deem it to be negative. 
+
+#K fold with oversampling 
+```{r K fold with oversampling}
+airbnb1 <- airbnb
+
+#library(caret)
+#library(pROC)
+#create stratified 5 folds 
+set.seed(41)
+folds <- createFolds(y=airbnb1$totalsent, k=5, list=FALSE)
+airbnb.folds <- airbnb1
+airbnb.folds$folds <- folds #dataframe with fold numbers as a column
+head(airbnb.folds)
+
+#check class balance for each fold to ensure they're the same 
+for (f in 1:5){
+  print(prop.table(table(airbnb.folds$totalsent[folds == f])))
+}
+```
+
+
+```{r oversample by fold}
+#oversample by 5 fold 
+#per fold, oversample minority class to counter imbalance of classes prior to modeling (save rows back into the dataframe) 
+airbnb.over <- airbnb.folds
+for (f in 1:5) {
+  x <- ovun.sample(totalsent ~., 
+                   data = airbnb.over[airbnb.over$folds == f,],
+                   method = 'over',
+                   seed = 38)
+  y <- airbnb.over[!(airbnb.over$folds == f),]
+  airbnb.over <- rbind(y, x$data)
+}
+
+#confirm equal number of classes per fold 
+table(airbnb.over$folds, airbnb.over$totalsent)
+#total number of cases 
+dim(airbnb.over)
+str(airbnb.over)
+```
+
+```{r Create empty dataframe for evaluation}
+#create empty dataframe for evaluation 
+Accuracy <- rep(0, times=5)
+F1 <- rep(0, times=5)
+Auc <- rep(0, times=5)
+Sensitivity <- rep(0, times=5)
+Specificity <- rep(0, times=5)
+#cbind columns into a dataframe
+eval.nb1 <- as.data.frame(cbind(Accuracy, F1, Auc, Sensitivity, Specificity))
+```
+
+##Naive Bayes 
+
+```{r Naive bayes Kfold, message=FALSE, warning=FALSE}
+library(pROC)
+#run NB for each group of folds for nb model & store in eval.nb1
+
+for (f in 1:5){
+  nbmodel <- naiveBayes(totalsent ~., 
+                        data=airbnb.over[airbnb.over[,11] != f, 1:10])
+  nbpred <- predict(nbmodel, airbnb.over[airbnb.over[,11] == f, 1:10])
+  nbmatrix <- table(airbnb.over[airbnb.over[,11] == f, 10], nbpred)
+  nbresult <- confusionMatrix(nbmatrix, positive = 'Positive')
+  
+  eval.nb1$Accuracy[f] <- nbresult$overall['Accuracy']
+  eval.nb1$F1[f] <- nbresult$byClass['F1']
+  nb1roc <- roc(airbnb.over[airbnb.over[,11] == f, 10], predictor= factor(nbpred, ordered=TRUE))
+  eval.nb1$Auc[f] <- auc(nb1roc)
+  eval.nb1$Sensitivity[f] <- nbresult$byClass['Sensitivity']
+  eval.nb1$Specificity[f] <- nbresult$byClass['Specificity']
+  
+}
+
+#Evaluate Model 
+eval.nb1
+#Get Mean of all folds 
+summary(eval.nb1)
+#result
+nb1roc
+nbresult
+```
+
+##Random Forest
+
+```{r RF Kfold, message=FALSE, warning=FALSE}
+#library(randomForest)
+#cbind columns into a dataframe
+eval.rf1 <- as.data.frame(cbind(Accuracy, F1, Auc, Sensitivity, Specificity))
+
+#run RF for each group of folds for rf model & store in eval.rf1
+for (f in 1:5){
+  rfmodel <- randomForest(totalsent ~., 
+                          data=airbnb.over[airbnb.over[,11] !=f, 1:10])
+  rfpred <- predict(rfmodel, airbnb.over[airbnb.over[,11] == f, 1:10])
+  rfmatrix <- table(airbnb.over[airbnb.over[,11] == f, 10], rfpred)
+  rfresult <- confusionMatrix(rfmatrix, positive = 'Positive')
+  
+  eval.rf1$Accuracy[f] <- rfresult$overall['Accuracy']
+  eval.rf1$F1[f] <- rfresult$byClass['F1']
+  rf1roc <- roc(airbnb.over[airbnb.over[,11] == f, 10], predictor = factor(rfpred, ordered=TRUE))
+  eval.rf1$Auc[f] <- auc(rf1roc)
+  eval.rf1$Sensitivity[f] <- rfresult$byClass['Sensitivity']
+  eval.rf1$Specificity[f] <- rfresult$byClass['Specificity']
+  
+}
+
+#Evaluate model 
+eval.rf1
+summary(eval.rf1)
+#result
+rf1roc
+rfresult
+```
+
+##Logistic Regression 
+```{r LR K fold, message=FALSE, warning=FALSE}
+#cbind columns into a dataframe
+eval.lr1 <- as.data.frame(cbind(Accuracy, F1, Auc, Sensitivity, Specificity))
+
+#run LR algorithm through groups of folds $ store in eval.lr1
+for (f in 1:5){
+  lrmodel <- glm(totalsent ~., 
+                 data=airbnb.over[airbnb.over[,11] !=f, 1:10], 
+                 family=binomial(link="logit"))
+  lrpred <- predict(lrmodel, airbnb.over[airbnb.over[,11] == f, 1:10], type="response")
+  lrpred1 <-  ifelse(lrpred > 0.5, 'Positive', 'Negative')
+  lrmatrix <- table(airbnb.over[airbnb.over[,11] == f, 10], lrpred1)
+  lrresult <- confusionMatrix(lrmatrix, positive = 'Positive')
+  
+  eval.lr1$Accuracy[f] <- lrresult$overall['Accuracy']
+  eval.lr1$F1[f] <- lrresult$byClass['F1']
+  lr1roc <- roc(airbnb.over[airbnb.over[,11] == f, 10], 
+                predictor = factor(lrpred1,ordered = TRUE))
+  eval.lr1$Auc[f] <- auc(lr1roc)
+  eval.lr1$Sensitivity[f] <- lrresult$byClass['Sensitivity']
+  eval.lr1$Specificity[f] <- lrresult$byClass['Specificity']
+}
+
+#evaluate model
+eval.lr1
+
+#summary/mean of model 
+summary(eval.lr1)
+
+#result
+lr1roc
+lrresult
+lrmodel
+```
+
+Run Logistic Regression with fewer predictors 
+
+```{r LR model with fewer predictors, warning=FALSE, message=FALSE}
+
+#cbind columns into a dataframe
+eval.lr1.2 <- as.data.frame(cbind(Accuracy, F1, Auc, Sensitivity, Specificity))
+
+#run LR algorithm through groups of folds $ store in eval.lr1
+for (f in 1:5){
+  lrmodel.2 <- glm(totalsent ~ number_of_reviews + reviews_per_month + room_type + region, 
+                 data=airbnb.over[airbnb.over[,11] !=f, 1:10], 
+                 family=binomial(link="logit"))
+  lrpred1.2 <- predict(lrmodel.2, airbnb.over[airbnb.over[,11] == f, 1:10], type="response")
+  lrpred1.2 <-  ifelse(lrpred1.2 > 0.5, 'Positive', 'Negative')
+  lrmatrix1.2 <- table(airbnb.over[airbnb.over[,11] == f, 10], lrpred1.2)
+  lrresult1.2 <- confusionMatrix(lrmatrix1.2, positive = 'Positive')
+  
+  eval.lr1.2$Accuracy[f] <- lrresult1.2$overall['Accuracy']
+  eval.lr1.2$F1[f] <- lrresult1.2$byClass['F1']
+  lr1roc1.2 <- roc(airbnb.over[airbnb.over[,11] == f, 10], 
+                predictor = factor(lrpred1.2,ordered = TRUE))
+  eval.lr1.2$Auc[f] <- auc(lr1roc1.2)
+  eval.lr1.2$Sensitivity[f] <- lrresult1.2$byClass['Sensitivity']
+  eval.lr1.2$Specificity[f] <- lrresult1.2$byClass['Specificity']
+}
+
+#evaluate
+summary(eval.lr1.2)
+
+#goodness of fit 
+anova(lrmodel, lrmodel.2, test="Chisq")
+#P value < 0.05 reject null hypothesis that models are equivalent
+
+#to assess importance of individual predictors - look at absolute value of the t-statistic for each model parameter 
+varImp(lrmodel.2)
+```
+
+
+
+```{r Bar graph K fold over sample}
+summary(eval.nb1)
+eval.rf1
+eval.lr1
+
+eval <- data.frame("Model" = c("NB", "RF", "LR"), 
+                   "Accuracy" = c(0.853, 0.595, 0.878), 
+                   "AUC" = c(0.854, 0.596, 0.878), 
+                   "Sensitivity" = c(0.965, 0.553, 0.941), 
+                   "Specificity" = c(0.786, 0.912, 0.832))
+eval
+```
+
+
+
+#K fold with Both over/under sampling 
+
+```{r Kfold both over/under sampling}
+#per fold, over/undersample to counter imbalance of classes prior to modeling (save rows back into the dataframe) p default is 0.5
+airbnb.both <- airbnb.folds
+for (f in 1:5) {
+  x <- ovun.sample(totalsent ~., 
+                   data = airbnb.both[airbnb.both$folds == f,],
+                   method = 'both',
+                   seed = 38)
+  y <- airbnb.both[!(airbnb.both$folds == f),]
+  airbnb.both <- rbind(y, x$data)
+}
+
+#confirm equal number of classes per fold 
+table(airbnb.both$folds, airbnb.both$totalsent)
+#total number of cases 
+dim(airbnb.both)
+str(airbnb.both)
+
+```
+##Naive Bayes with Both over/under sampling folds 
+
+```{r NB Kfold over/under}
+#create empty dataframe 
+#cbind columns into a dataframe
+eval.nb2 <- as.data.frame(cbind(Accuracy, F1, Auc, Sensitivity, Specificity))
+
+#run NB for each group of folds for nb model & store in eval.nb1
+
+for (f in 1:5){
+  nbmodel2 <- naiveBayes(totalsent ~., 
+                        data=airbnb.both[airbnb.both[,11] != f, 1:10])
+  nbpred2 <- predict(nbmodel2, airbnb.both[airbnb.both[,11] == f, 1:10])
+  nbmatrix2 <- table(airbnb.both[airbnb.both[,11] == f, 10], nbpred2)
+  nbresult2 <- confusionMatrix(nbmatrix2, positive = 'Positive')
+  
+  eval.nb2$Accuracy[f] <- nbresult2$overall['Accuracy']
+  eval.nb2$F1[f] <- nbresult2$byClass['F1']
+  nb2roc <- roc(airbnb.both[airbnb.both[,11] == f, 10], 
+                predictor= factor(nbpred2, ordered=TRUE))
+  eval.nb2$Auc[f] <- auc(nb2roc)
+  eval.nb2$Sensitivity[f] <- nbresult2$byClass['Sensitivity']
+  eval.nb2$Specificity[f] <- nbresult2$byClass['Specificity']
+  
+}
+
+#Evaluate Model 
+eval.nb2
+#Get Mean of all folds 
+summary(eval.nb2)
+
+#results
+nb2roc
+nbresult2
+```
+
+##Random Forest
+
+```{r RF Kfold over/under}
+#library(randomForest)
+#cbind columns into a dataframe
+eval.rf2 <- as.data.frame(cbind(Accuracy, F1, Auc, Sensitivity, Specificity))
+
+#run RF for each group of folds for rf model & store in eval.rf1
+for (f in 1:5){
+  rfmodel2 <- randomForest(totalsent ~., 
+                          data=airbnb.both[airbnb.both[,11] !=f, 1:10])
+  rfpred2 <- predict(rfmodel2, airbnb.both[airbnb.both[,11] == f, 1:10])
+  rfmatrix2 <- table(airbnb.both[airbnb.both[,11] == f, 10], rfpred2)
+  rfresult2 <- confusionMatrix(rfmatrix2, positive = 'Positive')
+  
+  eval.rf2$Accuracy[f] <- rfresult2$overall['Accuracy']
+  eval.rf2$F1[f] <- rfresult2$byClass['F1']
+  rf2roc <- roc(airbnb.both[airbnb.both[,11] == f, 10], predictor = factor(rfpred2, ordered=TRUE))
+  eval.rf2$Auc[f] <- auc(rf2roc)
+  eval.rf2$Sensitivity[f] <- rfresult2$byClass['Sensitivity']
+  eval.rf2$Specificity[f] <- rfresult2$byClass['Specificity']
+  
+}
+
+#Evaluate model 
+eval.rf2
+summary(eval.rf2)
+#result
+rf2roc
+rfresult2
+```
+
+##Logistic Regression 
+```{r LR K fold over/under}
+#cbind columns into a dataframe
+eval.lr2 <- as.data.frame(cbind(Accuracy, F1, Auc, Sensitivity, Specificity))
+
+#run LR algorithm through groups of folds $ store in eval.lr1
+for (f in 1:5){
+  lrmodel2 <- glm(totalsent ~., 
+                 data=airbnb.both[airbnb.both[,11] !=f, 1:10], 
+                 family=binomial(link="logit"))
+  lrpred2 <- predict(lrmodel2, airbnb.both[airbnb.both[,11] == f, 1:10],
+                     type="response")
+  lrpred2 <-  ifelse(lrpred2 > 0.5, 'Positive', 'Negative')
+  lrmatrix2 <- table(airbnb.both[airbnb.both[,11] == f, 10], lrpred2)
+  lrresult2 <- confusionMatrix(lrmatrix2, positive = 'Positive')
+  
+  eval.lr2$Accuracy[f] <- lrresult2$overall['Accuracy']
+  eval.lr2$F1[f] <- lrresult2$byClass['F1']
+  lr2roc <- roc(airbnb.both[airbnb.both[,11] == f, 10], 
+                predictor = factor(lrpred2,ordered = TRUE))
+  eval.lr2$Auc[f] <- auc(lr2roc)
+  eval.lr2$Sensitivity[f] <- lrresult2$byClass['Sensitivity']
+  eval.lr2$Specificity[f] <- lrresult2$byClass['Specificity']
+}
+
+#evaluate model
+eval.lr2
+
+#summary/mean of model 
+summary(eval.lr2) 
+
+#result
+lr2roc
+lrresult2
+```
+
+```{r Evaluation Models with Modified Features & oversampling}
+#oversampling
+summary(eval.nb1)
+summary(eval.rf1)
+summary(eval.lr1)
+
+#boxplots
+boxplot(eval.nb1, 
+        main='Naive bayes Evaluation Modified Features (Over)')
+boxplot(eval.rf1,
+        main='Random Forest Evaluation Modified Features (Over)')
+boxplot(eval.lr1,
+        main='Logistic Regression Evaluation Modified Features (Over)')
+```
+
+```{r Evaluation Model with Modified features and over/under sampling }
+#both under/over sampling 
+summary(eval.nb2)
+summary(eval.rf2)
+summary(eval.lr2)
+
+#boxplots
+boxplot(eval.nb2, 
+        main='Naive bayes Evaluation Modified Features (Both)')
+boxplot(eval.rf2,
+        main='Random Forest Evaluation Modified Features (Both)')
+boxplot(eval.lr2,
+        main='Logistic Regression Evaluation Modified Features (Both)')
+```
+
+```{r}
+plot(nb1roc)
+plot(rf1roc)
+plot(lr1roc)
+```
+
+
+#Modeling with original features with 'og_airbnbmodel'
+
+```{r}
+str(og_airbnbmodel)
+og_airbnbmodel$totalsent <- as.factor(og_airbnbmodel$totalsent)
+```
+
+```{r}
+#standardize attributes 
+og_airbnbmodel$price <- scale(og_airbnbmodel$price)
+og_airbnbmodel$minimum_nights <- scale(og_airbnbmodel$minimum_nights)
+og_airbnbmodel$number_of_reviews <- scale(og_airbnbmodel$number_of_reviews)
+og_airbnbmodel$reviews_per_month <- scale(og_airbnbmodel$reviews_per_month)
+og_airbnbmodel$calculated_host_listings_count <- scale(og_airbnbmodel$calculated_host_listings_count)
+og_airbnbmodel$availability_365 <- scale(og_airbnbmodel$availability_365)
+head(og_airbnbmodel)
+```
+
+##Classification Model with Percentage Split and Original Features 
+
+```{r}
+#splitting data into training (70%) and test set (30%) prior to tackling class imbalance 
+set.seed(123)
+og.split <- sort(sample(nrow(og_airbnbmodel), nrow(og_airbnbmodel)*.7))
+og.train <- og_airbnbmodel[og.split,]
+og.test <- og_airbnbmodel[-og.split,]
+
+#check class distribution in train set 
+prop.table(table(og.test$totalsent))
+table(og.test$totalsent)
+```
+
+```{r Oversample Training Split - OG, message=FALSE, warning=FALSE}
+#oversampling - oversample minority class
+data_balanced_over_og <- ovun.sample(totalsent ~., 
+                                  data=og.train, method="over", seed=1)$data
+table(data_balanced_over_og$totalsent)
+
+#both under and over sample 
+data_balanced_both_og <- ovun.sample(totalsent ~., 
+                                  data=og.train, method="both", p=0.5, seed=1)$data
+table(data_balanced_both_og$totalsent)
+
+#relevel structure to Factor LVL 2 "Negative" "Positive" 
+data_balanced_over_og$totalsent <- relevel(data_balanced_over_og$totalsent, "Negative") #over
+data_balanced_both_og$totalsent <- relevel(data_balanced_both_og$totalsent, "Negative") #both
+```
+
+```{r Naive Bayes OG Percentage Split, message=FALSE, warning=FALSE}
+#oversampled data
+naive.over.og <- naiveBayes(totalsent ~., data=data_balanced_over_og)
+pred.naive.over.og <- predict(naive.over.og, newdata=og.test)
+nbroc.over.og <- roc(og.test$totalsent, predictor=factor(pred.naive.over.og, ordered=TRUE)) #AUC
+nbroc.over.og #ROC curve
+nb.over.og <- table(og.test$totalsent, pred.naive.over.og) #confusionmatrix 
+nbresult.over.og <- confusionMatrix(nb.over.og, positive = "Positive")
+
+#both under/oversampled data
+naive.both.og <- naiveBayes(totalsent ~., data=data_balanced_both_og)
+pred.naive.both.og <- predict(naive.both.og, newdata=og.test)
+nbroc.both.og <- roc(og.test$totalsent, predictor=factor(pred.naive.both.og, ordered=TRUE)) #AUC
+nbroc.both.og #ROC curve
+nb.both.og <- table(og.test$totalsent, pred.naive.both.og) #confusionmatrix
+nbresult.both.og <- confusionMatrix(nb.both.og, positive = "Positive")
+
+
+nbresult.over.og
+nbresult.both.og
+```
+
+```{r Random Forest OG Percentage Split, message=FALSE, warning=FALSE}
+#Build Random Forest models 
+rf.over.og <- randomForest(totalsent ~., data=data_balanced_over_og, ntree=500) #oversample
+pred.rf.over.og <- predict(rf.over.og, newdata=og.test) #oversample
+rfroc.over.og <- roc.curve(og.test$totalsent, pred.rf.over.og) #oversampling
+pred_over_cm_og <- table(og.test$totalsent, pred.rf.over.og) #oversample
+rfresult.over.og <- confusionMatrix(pred_over_cm_og, positive = "Positive")
+
+#both under/over 
+rf.both.og <- randomForest(totalsent ~., data=data_balanced_both_og, ntree=500) #both under/over
+pred.rf.both.og <- predict(rf.both.og, newdata=og.test) #both under/over
+rfroc.both.og <- roc.curve(og.test$totalsent, pred.rf.both.og) 
+pred_both_cm_og <- table(og.test$totalsent, pred.rf.both.og)
+rfresult.both.og <- confusionMatrix(pred_both_cm_og, positive = "Positive")
+
+rfresult.over.og
+rfresult.both.og
+```
+
+```{r Logistic Regression OG Percentage Split, message=FALSE, warning=FALSE}
+#log model with over sample 
+log.over.og <- glm(totalsent ~., 
+                data=data_balanced_over_og, 
+                family = binomial(link = "logit"))
+log.over.pred.og <- predict(log.over.og, og.test, type="response")
+log.over.pred.og <- ifelse(log.over.pred.og > 0.5, 'Positive', 'Negative')
+lrroc.over.og <- roc.curve(og.test$totalsent, log.over.pred.og) 
+uover.og <- union(log.over.pred.og, og.test$totalsent) #union
+log_over_output_og <- table(factor(og.test$totalsent, uover.og),
+                            factor(log.over.pred.og, uover.og)) #confmatrix
+lrresult.over.og <- confusionMatrix(log_over_output_og) #summaryresults
+
+#model with both under/over
+log.both.og <- glm(totalsent ~., 
+                   data=data_balanced_both_og, 
+                   family=binomial(link="logit"))
+log.both.pred.og <- predict(log.both.og, og.test, type="response")
+log.both.pred.og <- ifelse(log.both.pred.og > 0.5, 'Positive', 'Negative')
+lrroc.both.og <- roc.curve(og.test$totalsent, log.both.pred.og)
+uboth.og <- union(log.both.pred.og, og.test$totalsent)
+log_both_output_og <- table(factor(og.test$totalsent, uboth.og),
+                            factor(log.both.pred.og, uboth.og))
+lrresult.both.og <- confusionMatrix(log_both_output_og)
+
+lrroc.over.og
+lrroc.both.og
+lrresult.over.og
+lrresult.both.og
+```
+
+##Classification Models with K fold & Original Features
+
+```{r Create Stratified Folds for K-fold, message=FALSE, warning=FALSE}
+#create stratified folds 
+set.seed(41)
+ogfolds <- createFolds(y=og_airbnbmodel$totalsent, k=5, list=FALSE)
+ogfolds.df <- og_airbnbmodel
+ogfolds.df$folds <- folds
+head(ogfolds.df)
+
+#check class balance for each fold 
+for (f in 1:5){
+  print(prop.table(table(ogfolds.df$totalsent[folds == f])))
+}
+```
+
+```{r Oversample by Fold}
+#oversample by fold 
+og.over <- ogfolds.df
+for (f in 1:5){
+  x <- ovun.sample(totalsent ~., 
+                   data = og.over[og.over$folds == f,],
+                   method = 'over',
+                   seed = 38)
+  y <- og.over[!(og.over$folds == f),]
+  og.over <- rbind(y, x$data)
+}
+
+#confirm equal number of classes per fold 
+table(og.over$folds, og.over$totalsent)
+```
+
+```{r Create Evaluation Dataframes}
+#create empty dataframe for evaluation 
+Accuracy <- rep(0, times=5)
+F1 <- rep(0, times=5)
+Auc <- rep(0, times=5)
+Sensitivity <- rep(0, times=5)
+Specificity <- rep(0, times=5)
+#cbind columns into a dataframe
+eval.nb1.og <- as.data.frame(cbind(Accuracy, F1, Auc, Sensitivity, Specificity))
+```
+
+```{r Naive Bayes Original Data Kfold, message=FALSE, warning=FALSE}
+#run NB 
+for (f in 1:5){
+  nbmodel.og <- naiveBayes(totalsent ~., 
+                           data = og.over[og.over[,11] != f, 1:10])
+  nbpred.og <- predict(nbmodel.og, og.over[og.over[,11] == f, 1:10])
+  nbmatrix.og <- table(og.over[og.over[,11] == f, 10], nbpred.og)
+  nbresult.og <- confusionMatrix(nbmatrix.og, positive = 'Positive')
+  
+  eval.nb1.og$Accuracy[f] <- nbresult.og$overall['Accuracy']
+  eval.nb1.og$F1[f] <- nbresult.og$byClass['F1']
+  nb1roc.og <- roc(og.over[og.over[,11] ==f, 10], 
+                   predictor = factor(nbpred.og, ordered=TRUE))
+  eval.nb1.og$Auc[f] <- auc(nb1roc.og)
+  eval.nb1.og$Sensitivity[f] <- nbresult.og$byClass['Sensitivity']
+  eval.nb1.og$Specificity[f] <- nbresult.og$byClass['Specificity']
+}
+
+#evaluate model
+eval.nb1.og
+summary(eval.nb1.og)
+
+```
+
+```{r Random Forest Original Data Kfold, message=FALSE, warning=FALSE}
+#cbind columns into df
+eval.rf1.og <- as.data.frame(cbind(Accuracy, F1, Auc, Sensitivity, Specificity))
+
+#run RF
+for (f in 1:5){
+  rfmodel.og <- randomForest(totalsent~., 
+                             data=og.over[og.over[,11] !=f, 1:10])
+  rfpred.og <- predict(rfmodel.og, og.over[og.over[,11] == f, 1:10])
+  rfmatrix.og <- table(og.over[og.over[,11] == f, 10], rfpred.og)
+  rfresult.og <- confusionMatrix(rfmatrix.og, positive = 'Positive')
+  
+  eval.rf1.og$Accuracy[f] <- rfresult.og$overall['Accuracy']
+  eval.rf1.og$F1[f] <- rfresult.og$byClass['F1']
+  rf1roc.og <- roc(og.over[og.over[,11] ==f, 10], 
+                   predictor = factor(rfpred.og, ordered=TRUE))
+  eval.rf1.og$Auc[f] <- auc(rf1roc.og)
+  eval.rf1.og$Sensitivity[f] <- rfresult.og$byClass['Sensitivity']
+  eval.rf1.og$Specificity[f] <- rfresult.og$byClass['Specificity']
+}
+
+#evaluate model
+eval.rf1.og
+summary(eval.rf1.og)
+```
+
+```{r Logistic Regression Original Data Kfold oversample, message=FALSE, warning=FALSE}
+#cbind columns into eval df 
+eval.lr1.og <- as.data.frame(cbind(Accuracy, F1, Auc, Sensitivity, Specificity))
+
+#run LR 
+for(f in 1:5){
+  lrmodel.og <- glm(totalsent ~., 
+                    data=og.over[og.over[,11] !=f, 1:10],
+                    family = binomial(link='logit'))
+  lrpred.og <- predict(lrmodel.og, og.over[og.over[,11] == f, 1:10], 
+                       type = "response")
+  lrpred2.og <- ifelse(lrpred.og > 0.5, 'Positive', 'Negative')
+  lrmatrix.og <- table(og.over[og.over[,11] ==f, 10], lrpred2.og)
+  lrresult.og <- confusionMatrix(lrmatrix.og, positive = 'Positive')
+  
+  eval.lr1.og$Accuracy[f] <- lrresult.og$overall['Accuracy']
+  eval.lr1.og$F1[f] <- lrresult.og$byClass['F1']
+  lr1roc.og <- roc(og.over[og.over[,11] ==f, 10],
+                   predictor = factor(lrpred2.og, ordered=TRUE))
+  eval.lr1.og$Auc[f] <- auc(lr1roc.og)
+  eval.lr1.og$Sensitivity[f] <- lrresult.og$byClass['Sensitivity']
+  eval.lr1.og$Specificity[f] <- lrresult.og$byClass['Specificity']
+}
+
+#evaluate lr model 
+eval.lr1.og
+summary(eval.lr1.og)
+
+```
+
+```{r Evaluation of all models with Original Data & Oversampled Kfold, message=FALSE, warning=FALSE}
+summary(eval.nb1.og)
+summary(eval.rf1.og)
+summary(eval.lr1.og)
+
+#boxplots
+boxplot(eval.nb1.og, 
+        main='Naive bayes Evaluation OG with Over sampling')
+boxplot(eval.rf1.og,
+        main='Random Forest Evaluation OG with Over sampling')
+boxplot(eval.lr1.og,
+        main='Logistic Regression Evaluation OG with Over sampling')
+```
+
+###Both Over/under Sampling Kfold 
+
+```{r Both over/under sample by Kfold, message=FALSE, warning=FALSE}
+#both over/under
+og.both <- ogfolds.df
+for (f in 1:5){
+  x <- ovun.sample(totalsent ~., 
+                   data = og.both[og.both$folds == f,],
+                   method = 'both',
+                   seed = 38)
+  y <- og.both[!(og.both$folds == f),]
+  og.both <- rbind(y, x$data)
+}
+
+#confirm equal number of classes per fold 
+table(og.both$folds, og.both$totalsent)
+```
+
+```{r Naive Bayes Original Data with Over/Undersampling Kfold, message=FALSE, warning=FALSE}
+#cbind evaluation df 
+eval.nb2.og <- as.data.frame(cbind(Accuracy, F1, Auc, Sensitivity, Specificity))
+
+#run NB 
+for (f in 1:5){
+  nbmodel2.og <- naiveBayes(totalsent ~., 
+                           data = og.both[og.both[,11] != f, 1:10])
+  nbpred2.og <- predict(nbmodel2.og, og.both[og.both[,11] == f, 1:10])
+  nbmatrix2.og <- table(og.both[og.both[,11] == f, 10], nbpred2.og)
+  nbresult2.og <- confusionMatrix(nbmatrix2.og, positive = 'Positive')
+  
+  eval.nb2.og$Accuracy[f] <- nbresult2.og$overall['Accuracy']
+  eval.nb2.og$F1[f] <- nbresult2.og$byClass['F1']
+  nb2roc.og <- roc(og.both[og.both[,11] ==f, 10], 
+                   predictor = factor(nbpred2.og, ordered=TRUE))
+  eval.nb2.og$Auc[f] <- auc(nb2roc.og)
+  eval.nb2.og$Sensitivity[f] <- nbresult2.og$byClass['Sensitivity']
+  eval.nb2.og$Specificity[f] <- nbresult2.og$byClass['Specificity']
+}
+
+#evaluate model
+eval.nb2.og
+summary(eval.nb2.og)
+
+```
+
+```{r Random Forest Original Data with under/over sampling Kfold, message=FALSE, warning=FALSE}
+#cbind columns into df
+eval.rf2.og <- as.data.frame(cbind(Accuracy, F1, Auc, Sensitivity, Specificity))
+
+#run RF
+for (f in 1:5){
+  rfmodel2.og <- randomForest(totalsent~., 
+                             data=og.both[og.both[,11] !=f, 1:10],
+                             ntree=800) 
+  rfpred2.og <- predict(rfmodel2.og, og.both[og.both[,11] == f, 1:10])
+  rfmatrix2.og <- table(og.both[og.both[,11] == f, 10], rfpred2.og)
+  rfresult2.og <- confusionMatrix(rfmatrix2.og, positive = 'Positive')
+  
+  eval.rf2.og$Accuracy[f] <- rfresult2.og$overall['Accuracy']
+  eval.rf2.og$F1[f] <- rfresult2.og$byClass['F1']
+  rf2roc.og <- roc(og.both[og.both[,11] ==f, 10], 
+                   predictor = factor(rfpred2.og, ordered=TRUE))
+  eval.rf2.og$Auc[f] <- auc(rf2roc.og)
+  eval.rf2.og$Sensitivity[f] <- rfresult2.og$byClass['Sensitivity']
+  eval.rf2.og$Specificity[f] <- rfresult2.og$byClass['Specificity']
+}
+
+#evaluate model
+eval.rf2.og
+summary(eval.rf2.og)
+```
+
+```{r Logistic Regression Original Data Kfold, message=FALSE, warning=FALSE}
+#cbind columns into eval df 
+eval.lr2.og <- as.data.frame(cbind(Accuracy, F1, Auc, Sensitivity, Specificity))
+
+#run LR 
+for(f in 1:5){
+  lrmodel2.og <- glm(totalsent ~., 
+                    data=og.both[og.both[,11] !=f, 1:10],
+                    family = binomial(link='logit'))
+  lrpred2.og <- predict(lrmodel2.og, og.both[og.both[,11] == f, 1:10], 
+                       type = "response")
+  lrpred22.og <- ifelse(lrpred2.og > 0.5, 'Positive', 'Negative')
+  lrmatrix2.og <- table(og.both[og.both[,11] ==f, 10], lrpred22.og)
+  lrresult2.og <- confusionMatrix(lrmatrix2.og, positive = 'Positive')
+  
+  eval.lr2.og$Accuracy[f] <- lrresult2.og$overall['Accuracy']
+  eval.lr2.og$F1[f] <- lrresult2.og$byClass['F1']
+  lr2roc.og <- roc(og.both[og.both[,11] ==f, 10],
+                   predictor = factor(lrpred22.og, ordered=TRUE))
+  eval.lr2.og$Auc[f] <- auc(lr2roc.og)
+  eval.lr2.og$Sensitivity[f] <- lrresult2.og$byClass['Sensitivity']
+  eval.lr2.og$Specificity[f] <- lrresult2.og$byClass['Specificity']
+}
+
+#evaluate lr model 
+eval.lr2.og
+summary(eval.lr2.og)
+```
+
+```{r Evaluation Models with Original Data & Under/Over sampling Kfold, message=FALSE, warning=FALSE}
+summary(eval.nb2.og)
+summary(eval.rf2.og)
+summary(eval.lr2.og)
+
+#boxplots
+boxplot(eval.nb2.og, 
+        main='Naive bayes Evaluation OG with under/over sampling')
+boxplot(eval.rf2.og,
+        main='Random Forest Evaluation OG with Under/Over sampling')
+boxplot(eval.lr2.og,
+        main='Logistic Regression Evaluation OG with under/over sampling')
+```
+
+#Statistical Hypothesis 
+Perform Wilcoxon signed-rank test between Naive Bayes model and Logistic Regression as their accuracy's differentiate minimally. 
+
+H0: there are no significant difference between the two models 
+H1: There is a significant difference between the two models.
+
+```{r}
+#modified features
+eval.nb1
+eval.lr1
+wilcox.test(eval.nb1$Accuracy, eval.lr1$Accuracy, paired = TRUE)
+
+#original features 
+eval.nb1.og
+eval.lr1.og
+wilcox.test(eval.nb1.og$Accuracy, eval.lr1.og$Accuracy, paired = TRUE)
+```
+P value 0.06 > 0.05. 
+Cannot reject the null hypothesis that there are no significant differences between the models. 
+
+```{r}
+wilcox.test(eval.nb1$Sensitivity, eval.lr1$Sensitivity, paired = TRUE)
+#not significant pvalue 0.06 > 0.05
+wilcox.test(eval.nb1.og$Sensitivity, eval.lr1$Sensitivity, paired = TRUE)
+#not significant pvalue 0.43 > 0.05
+
+
+```
+
