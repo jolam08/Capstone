@@ -1,11 +1,9 @@
-There is one .rmd file uploaded for Initial Code and Results. 
+There are two total .rmd files with codes
+1. Initial Code & Machine learning results 
+2. Sentiment Code only 
 
-There are three datasets used in this code. The raw data (2 datasets) is scraped on May 2020. 
-- Maylistings and Mayreviews is from insideairbnb.com 
-- DFclean_Sentiment.csv is an organic dataset saved from exploratory data and sentiment analysis. 
-
-This code includes 
-- exploratory analysis
-- sentiment analysis on airbnb Toronto reviews (including preprocessing)
-- sentiment classification 
-- building a sentiment classification model using ML algorithms 
+Three datasets used within the RMD codes 
+1. Maylistings raw listings details dataset (scraped from insideairbnb.com- May 2020) 
+2. Mayreviews raw review details dataset (scraped from Insideairbnb.com- May 2020) 
+3. dfclean_sentiment.csv used in Initial Code & Machine Learning results 
+    - (CSV file saved at the end of 'sentimentonly.rmd' file with sentiment scores from lexicon dictionaries) 
